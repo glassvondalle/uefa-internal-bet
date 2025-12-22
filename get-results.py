@@ -1,0 +1,885 @@
+"""
+European Club Cups Data Scraper
+Scrapes match data from Champions League, Europa League, and Conference League
+from FlashScore.com and formats it for the EUROPEAN_CLUB_CUPS_MATCHES table.
+
+Only includes CLUB teams - filters out any national team results.
+Uses Selenium for JavaScript-heavy sites like FlashScore.
+"""
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from bs4 import BeautifulSoup
+from datetime import datetime
+from typing import List, Dict, Optional
+import hashlib
+import re
+import time
+import csv
+import os
+
+# Competition configurations for FlashScore
+COMPETITIONS = {
+    "CL": {
+        "name": "Champions League",
+        "flashscore_url": "https://www.flashscore.com/football/europe/champions-league/results/"
+    },
+    "EL": {
+        "name": "Europa League",
+        "flashscore_url": "https://www.flashscore.com/football/europe/europa-league/results/"
+    },
+    "ECL": {
+        "name": "Conference League",
+        "flashscore_url": "https://www.flashscore.com/football/europe/europa-conference-league/results/"
+    }
+}
+
+# Common national team indicators to filter out
+NATIONAL_TEAM_INDICATORS = [
+    "national team", "national squad", "country team"
+]
+
+# Common club indicators
+CLUB_INDICATORS = ["FC", "CF", "AC", "AS", "SC", "United", "City", "Real", "Bayern", 
+                   "Barcelona", "Madrid", "Chelsea", "Arsenal", "Liverpool", "Manchester",
+                   "Club", "Athletic", "Sporting", "Olympique", "Paris", "Milan", "Inter"]
+
+
+def is_club_team(team_name: str) -> bool:
+    """
+    Check if a team is a club team (not a national team).
+    Filters out national teams based on common patterns.
+    """
+    if not team_name or len(team_name.strip()) < 3:
+        return False
+    
+    team_lower = team_name.lower().strip()
+    
+    # Check for explicit national team indicators
+    for indicator in NATIONAL_TEAM_INDICATORS:
+        if indicator in team_lower:
+            return False
+    
+    # Check if it's just a country name (likely national team)
+    country_only_patterns = [
+        r'^(england|spain|france|germany|italy|portugal|netherlands|belgium|'
+        r'poland|greece|turkey|russia|ukraine|sweden|norway|denmark|'
+        r'croatia|serbia|romania|bulgaria|hungary|czech|slovakia|switzerland|'
+        r'austria|scotland|wales|ireland|finland|iceland)$'
+    ]
+    
+    for pattern in country_only_patterns:
+        if re.match(pattern, team_lower):
+            has_club_indicator = any(ind.lower() in team_lower for ind in CLUB_INDICATORS)
+            if not has_club_indicator:
+                return False
+    
+    # If team name contains club indicators, it's definitely a club
+    if any(ind.lower() in team_lower for ind in CLUB_INDICATORS):
+        return True
+    
+    # Default: assume it's a club (most teams in these competitions are clubs)
+    return True
+
+
+def generate_match_id(competition: str, season: str, phase: str, home_team: str, 
+                      away_team: str, match_date: str) -> str:
+    """
+    Generate a unique MATCH_ID based on match attributes.
+    """
+    match_string = f"{competition}|{season}|{phase}|{home_team}|{away_team}|{match_date}"
+    match_hash = hashlib.md5(match_string.encode()).hexdigest()[:8].upper()
+    phase_clean = re.sub(r'[^A-Z0-9_]', '_', phase.upper())[:20]
+    season_clean = season.replace("/", "_")
+    return f"{competition}_{season_clean}_{phase_clean}_{match_hash}"
+
+
+def normalize_phase(phase_text: str) -> str:
+    """
+    Normalize phase information from scraped text.
+    """
+    if not phase_text:
+        return "UNKNOWN"
+    
+    phase_lower = phase_text.lower().strip()
+    
+    # Map common phase names
+    phase_mapping = {
+        "group stage": "GROUP_STAGE",
+        "group": "GROUP_STAGE",
+        "group a": "GROUP_A",
+        "group b": "GROUP_B",
+        "group c": "GROUP_C",
+        "group d": "GROUP_D",
+        "group e": "GROUP_E",
+        "group f": "GROUP_F",
+        "group g": "GROUP_G",
+        "group h": "GROUP_H",
+        "round of 16": "ROUND_OF_16",
+        "round of 32": "ROUND_OF_32",
+        "1/8 final": "ROUND_OF_16",
+        "1/4 final": "QUARTER_FINAL",
+        "quarter": "QUARTER_FINAL",
+        "quarter-final": "QUARTER_FINAL",
+        "semi": "SEMI_FINAL",
+        "semi-final": "SEMI_FINAL",
+        "final": "FINAL",
+        "play-off": "PLAY_OFF",
+        "playoff": "PLAY_OFF",
+        "qualifying": "QUALIFYING",
+        "preliminary": "PRELIMINARY"
+    }
+    
+    for key, value in phase_mapping.items():
+        if key in phase_lower:
+            return value
+    
+    # Clean and return uppercase version
+    return re.sub(r'[^A-Z0-9_]', '_', phase_text.upper())[:30]
+
+
+def parse_date(date_str: str) -> Optional[str]:
+    """
+    Parse various date formats to YYYY-MM-DD.
+    """
+    if not date_str:
+        return None
+    
+    date_str = date_str.strip()
+    
+    # Try common formats
+    formats = [
+        "%d.%m.%Y",
+        "%d/%m/%Y",
+        "%Y-%m-%d",
+        "%d %B %Y",
+        "%d %b %Y",
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%d.%m.%y",
+        "%d/%m/%y"
+    ]
+    
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            return dt.strftime("%Y-%m-%d")
+        except:
+            continue
+    
+    # Try to extract date from string with regex
+    date_match = re.search(r'(\d{1,2})[./](\d{1,2})[./](\d{4})', date_str)
+    if date_match:
+        day, month, year = date_match.groups()
+        try:
+            dt = datetime(int(year), int(month), int(day))
+            return dt.strftime("%Y-%m-%d")
+        except:
+            pass
+    
+    return None
+
+
+def init_driver(headless: bool = True) -> webdriver.Chrome:
+    """
+    Initialize Chrome WebDriver with appropriate options.
+    """
+    chrome_options = Options()
+    if headless:
+        chrome_options.add_argument('--headless')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+        return driver
+    except Exception as e:
+        print(f"❌ Error initializing Chrome driver: {e}")
+        print("   Make sure ChromeDriver is installed and in your PATH")
+        print("   Download from: https://chromedriver.chromium.org/")
+        raise
+
+
+def scrape_flashscore_competition(competition_code: str, limit: Optional[int] = None) -> List[Dict]:
+    """
+    Scrape match results from FlashScore for a competition.
+    
+    Args:
+        competition_code: CL, EL, or ECL
+        limit: Maximum number of matches to return (None for all)
+    
+    Returns:
+        List of match dictionaries
+    """
+    comp_config = COMPETITIONS.get(competition_code)
+    if not comp_config:
+        return []
+    
+    url = comp_config["flashscore_url"]
+    print(f"🔎 Scraping {comp_config['name']} from FlashScore: {url}")
+    
+    driver = None
+    try:
+        driver = init_driver(headless=True)
+        driver.get(url)
+        
+        # Wait for page to load
+        time.sleep(5)
+        
+        # Try to click "Show more" or load more matches if available
+        try:
+            # Look for "Show more" button and click it multiple times to load more matches
+            for _ in range(3):
+                show_more_buttons = driver.find_elements(By.XPATH, "//a[contains(text(), 'Show more') or contains(text(), 'More matches')]")
+                if show_more_buttons:
+                    driver.execute_script("arguments[0].click();", show_more_buttons[0])
+                    time.sleep(2)
+                else:
+                    break
+        except:
+            pass
+        
+        # Try using Selenium to find match elements directly
+        matches = []
+        
+        # FlashScore uses specific class patterns - try multiple selectors
+        # Based on FlashScore structure analysis
+        match_selectors = [
+            "div.event__match",  # Most common
+            "div[class*='event__match']",
+            "div.event__match--twoLine",  # Alternative format
+            "div[data-testid='match-row']",  # Data attribute
+            "div.sportName",
+            "div[class*='event']"  # Fallback
+        ]
+        
+        event_matches_selenium = []
+        for selector in match_selectors:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                if elements and len(elements) > 10:  # Make sure we got a good number
+                    event_matches_selenium = elements
+                    print(f"   Found {len(elements)} matches using selector: {selector}")
+                    break
+            except:
+                continue
+        
+        # Get page source for BeautifulSoup
+        page_source = driver.page_source
+        soup = BeautifulSoup(page_source, 'html.parser')
+        
+        # If Selenium didn't find them, try BeautifulSoup
+        if not event_matches_selenium:
+            # FlashScore uses specific class names for matches
+            event_matches = soup.find_all('div', class_=re.compile(r'event__match', re.I))
+            
+            if not event_matches:
+                event_matches = soup.find_all('div', attrs={'data-testid': re.compile(r'match', re.I)})
+            
+            if not event_matches:
+                # Try to find by score pattern
+                all_divs = soup.find_all('div')
+                for div in all_divs:
+                    text = div.get_text()
+                    if re.search(r'\d+\s*:\s*\d+', text):
+                        event_matches.append(div)
+            
+            print(f"   Found {len(event_matches)} potential match elements (BeautifulSoup)")
+            
+            # Convert to list for processing
+            event_matches_list = event_matches
+        else:
+            # Use Selenium elements - convert to BeautifulSoup for parsing
+            event_matches_list = []
+            for elem in event_matches_selenium:
+                html = elem.get_attribute('outerHTML')
+                soup_elem = BeautifulSoup(html, 'html.parser')
+                event_matches_list.append(soup_elem.find('div') or soup_elem)  # Get the main div
+        
+        print(f"   Found {len(event_matches_list)} potential match elements")
+        
+        # Try to extract matches using improved method
+        matches = extract_matches_from_flashscore_elements(event_matches_list, soup, competition_code, limit)
+        
+        # If still no matches, try the broader HTML parsing
+        # If we didn't find matches with the above method, try parsing the HTML more broadly
+        if not matches:
+            print("   Trying alternative extraction method...")
+            alt_matches = extract_matches_from_html_structure(soup, competition_code)
+            matches.extend(alt_matches)
+        
+        print(f"✅ Found {len(matches)} club matches from {comp_config['name']}")
+        
+        # Debug: Show first few matches if found
+        if matches and len(matches) > 0:
+            print(f"   Sample: {matches[0]['HOME_TEAM']} {matches[0]['HOME_GOALS']}-{matches[0]['AWAY_GOALS']} {matches[0]['AWAY_TEAM']}")
+        return matches
+        
+    except Exception as e:
+        print(f"❌ Error scraping FlashScore: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+    finally:
+        if driver:
+            driver.quit()
+
+
+def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup, 
+                                            competition_code: str, 
+                                            limit: Optional[int]) -> List[Dict]:
+    """
+    Extract matches from FlashScore elements with FlashScore-specific parsing.
+    FlashScore structure: event__match > event__participant (teams) + event__score (score)
+    """
+    matches = []
+    current_date = None
+    current_phase = "UNKNOWN"
+    
+    print(f"   Processing {len(elements)} elements...")
+    successful = 0
+    failed = 0
+    no_score = 0
+    no_teams = 0
+    
+    # Debug: Inspect first few elements
+    for i, element in enumerate(elements[:3]):  # Check first 3 for debugging
+        if hasattr(element, 'get_text'):
+            text = element.get_text(separator=' | ', strip=True)[:200]
+        else:
+            text = str(element)[:200]
+        print(f"   Debug element {i+1}: {text[:150]}...")
+    
+    for element in elements:
+        try:
+            # Get the element - handle both BeautifulSoup and Selenium elements
+            if hasattr(element, 'find_all'):
+                # BeautifulSoup element
+                match_element = element
+            else:
+                # Selenium element - convert to BeautifulSoup
+                html = element.get_attribute('outerHTML')
+                match_element = BeautifulSoup(html, 'html.parser').find('div') or BeautifulSoup(html, 'html.parser')
+            
+            # Get full text first to understand the structure
+            full_text = match_element.get_text(separator=' | ', strip=True)
+            
+            # FlashScore structure: Look for participant names
+            # Class names: event__participant, event__participant--home, event__participant--away
+            participants = match_element.find_all(['span', 'div', 'a'], 
+                                                 class_=re.compile(r'event__participant|participant', re.I))
+            
+            home_team = None
+            away_team = None
+            
+            # Method 1: Extract from participant elements
+            if len(participants) >= 2:
+                home_team = participants[0].get_text(strip=True)
+                away_team = participants[1].get_text(strip=True)
+            
+            # Method 2: Parse from pipe-separated text format "Team1 | Team2 | Score1 | Score2"
+            if not home_team or not away_team:
+                parts = [p.strip() for p in full_text.split('|')]
+                # Teams are usually the first two non-numeric, non-date parts
+                team_candidates = []
+                for part in parts:
+                    # Skip if it's a number (score) or date pattern
+                    if not part.isdigit() and not re.match(r'^\d{1,2}\.\d{1,2}', part):
+                        if len(part) > 2:  # Team names are usually longer
+                            team_candidates.append(part)
+                            if len(team_candidates) >= 2:
+                                break
+                
+                if len(team_candidates) >= 2:
+                    home_team = team_candidates[0]
+                    away_team = team_candidates[1]
+            
+            # Method 3: Look for any element with team-like text
+            if not home_team or not away_team:
+                all_text_elements = match_element.find_all(['span', 'div', 'a'])
+                # Filter for elements with substantial text (likely team names)
+                text_elements = [e for e in all_text_elements 
+                               if e.get_text(strip=True) and len(e.get_text(strip=True)) > 3 
+                               and not e.get_text(strip=True).isdigit()]
+                if len(text_elements) >= 2:
+                    home_team = text_elements[0].get_text(strip=True)
+                    away_team = text_elements[1].get_text(strip=True)
+            
+            if not home_team or not away_team:
+                no_teams += 1
+                if no_teams <= 3:  # Debug first few
+                    print(f"   ⚠️  No teams found. Text: {full_text[:200]}")
+                continue
+            
+            # Clean team names
+            home_team = re.sub(r'^\d+\.?\s*', '', home_team).strip()
+            home_team = re.sub(r'\s+', ' ', home_team)
+            away_team = re.sub(r'^\d+\.?\s*', '', away_team).strip()
+            away_team = re.sub(r'\s+', ' ', away_team)
+            
+            if len(home_team) < 2 or len(away_team) < 2:
+                no_teams += 1
+                continue
+            
+            # Extract score - FlashScore format can be "2:2" or "2 | 2" or just "2 2"
+            # full_text is already defined above
+            home_goals = None
+            away_goals = None
+            
+            # Method 1: Look for score pattern with colon "2:2"
+            score_match = re.search(r'(\d+)\s*[:]\s*(\d+)', full_text)
+            if score_match:
+                home_goals = int(score_match.group(1))
+                away_goals = int(score_match.group(2))
+            
+            # Method 2: Look for score pattern with pipe "2 | 2" (common in FlashScore)
+            if home_goals is None:
+                # Split by | and look for two consecutive numbers
+                parts = [p.strip() for p in full_text.split('|')]
+                for i in range(len(parts) - 1):
+                    if parts[i].isdigit() and parts[i+1].isdigit():
+                        home_goals = int(parts[i])
+                        away_goals = int(parts[i+1])
+                        break
+            
+            # Method 3: Look for two consecutive numbers in text (separated by space or |)
+            if home_goals is None:
+                score_match = re.search(r'(\d+)\s*[|]\s*(\d+)', full_text)
+                if score_match:
+                    home_goals = int(score_match.group(1))
+                    away_goals = int(score_match.group(2))
+            
+            # Method 4: Look in specific score elements
+            if home_goals is None:
+                score_elements = match_element.find_all(['span', 'div'], 
+                                                       class_=re.compile(r'event__score|event__result|score', re.I))
+                for score_elem in score_elements:
+                    score_text = score_elem.get_text(strip=True)
+                    score_match = re.search(r'(\d+)\s*[:|]\s*(\d+)', score_text)
+                    if score_match:
+                        home_goals = int(score_match.group(1))
+                        away_goals = int(score_match.group(2))
+                        break
+            
+            if home_goals is None or away_goals is None:
+                no_score += 1
+                if no_score <= 3:  # Debug first few
+                    print(f"   ⚠️  No score found. Text: {full_text[:200]}")
+                continue
+            
+            # Extract date - FlashScore uses event__time or event__date
+            match_date = current_date
+            date_elements = match_element.find_all(['span', 'div'], 
+                                                   class_=re.compile(r'event__time|event__date|time|date', re.I))
+            
+            # Also check parent and siblings for date
+            parent = match_element.find_parent()
+            if parent and not date_elements:
+                date_elements = parent.find_all(['span', 'div'], 
+                                               class_=re.compile(r'event__time|event__date|time|date', re.I))
+            
+            if date_elements:
+                date_str = date_elements[0].get_text(strip=True)
+                parsed_date = parse_date(date_str)
+                if parsed_date:
+                    match_date = parsed_date
+                    current_date = parsed_date
+            
+            if not match_date:
+                # Try to find date in the full text
+                full_text = match_element.get_text(separator=' ', strip=True)
+                date_match = re.search(r'(\d{1,2})[./](\d{1,2})[./](\d{4})', full_text)
+                if date_match:
+                    day, month, year = date_match.groups()
+                    try:
+                        match_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                        current_date = match_date
+                    except:
+                        match_date = datetime.now().strftime("%Y-%m-%d")
+                else:
+                    match_date = datetime.now().strftime("%Y-%m-%d")
+            
+            # Extract phase - look for round/stage information
+            phase = current_phase
+            phase_elements = match_element.find_all(['span', 'div'], 
+                                                    class_=re.compile(r'event__stage|event__round|round|stage|phase', re.I))
+            if not phase_elements and parent:
+                phase_elements = parent.find_all(['span', 'div'], 
+                                                  class_=re.compile(r'event__stage|event__round|round|stage|phase', re.I))
+            
+            if phase_elements:
+                phase_text = phase_elements[0].get_text(strip=True)
+                if phase_text:
+                    phase = normalize_phase(phase_text)
+                    current_phase = phase
+            
+            # Determine season from date
+            if match_date and match_date != "2024-01-01":
+                try:
+                    year = int(match_date.split('-')[0])
+                    month = int(match_date.split('-')[1])
+                    if month >= 7:  # Season starts in July/August
+                        season = f"{year}/{year + 1}"
+                    else:
+                        season = f"{year - 1}/{year}"
+                except:
+                    season = f"{datetime.now().year - 1}/{datetime.now().year}"
+            else:
+                season = f"{datetime.now().year - 1}/{datetime.now().year}"
+            
+            # Only add if both teams are clubs
+            if is_club_team(home_team) and is_club_team(away_team):
+                match_id = generate_match_id(
+                    competition_code, season, phase, home_team, away_team, match_date
+                )
+                
+                matches.append({
+                    "MATCH_ID": match_id,
+                    "COMPETITION": competition_code,
+                    "SEASON": season,
+                    "PHASE": phase,
+                    "MATCH_DATE": match_date,
+                    "HOME_TEAM": home_team,
+                    "AWAY_TEAM": away_team,
+                    "HOME_GOALS": home_goals,
+                    "AWAY_GOALS": away_goals
+                })
+                successful += 1
+                
+                if limit and len(matches) >= limit:
+                    break
+            else:
+                failed += 1
+                # Debug: show why it failed
+                if failed <= 3:  # Only show first 3 failures
+                    if not is_club_team(home_team):
+                        print(f"   ⚠️  Skipped (not club): {home_team}")
+                    if not is_club_team(away_team):
+                        print(f"   ⚠️  Skipped (not club): {away_team}")
+                    
+        except Exception as e:
+            failed += 1
+            if failed <= 3:  # Only show first 3 errors
+                print(f"   ⚠️  Extraction error: {str(e)[:50]}")
+            continue
+    
+    print(f"   Extracted {successful} matches")
+    print(f"   Stats: {no_score} no score, {no_teams} no teams, {failed} errors")
+    return matches
+
+
+def extract_match_from_flashscore_element(element, competition_code: str, 
+                                          default_date: Optional[str], 
+                                          default_phase: str) -> Optional[Dict]:
+    """
+    Extract match data from a FlashScore HTML element.
+    """
+    try:
+        text = element.get_text(separator=' ', strip=True)
+        
+        # Look for score pattern
+        score_match = re.search(r'(\d+)\s*[:]\s*(\d+)', text)
+        if not score_match:
+            return None
+        
+        home_goals = int(score_match.group(1))
+        away_goals = int(score_match.group(2))
+        
+        # Extract team names - they're usually before and after the score
+        # Or in separate spans/divs
+        team_elements = element.find_all(['span', 'div', 'a'], class_=re.compile(r'team|participant', re.I))
+        
+        home_team = None
+        away_team = None
+        
+        if len(team_elements) >= 2:
+            home_team = team_elements[0].get_text(strip=True)
+            away_team = team_elements[1].get_text(strip=True)
+        else:
+            # Try to extract from text
+            parts = re.split(r'\d+\s*:\s*\d+', text)
+            if len(parts) >= 2:
+                home_team = parts[0].strip()
+                away_team = parts[1].strip()
+        
+        if not home_team or not away_team:
+            return None
+        
+        # Extract date
+        date_element = element.find_parent().find(['span', 'div'], class_=re.compile(r'date|time', re.I))
+        if date_element:
+            date_str = date_element.get_text(strip=True)
+            match_date = parse_date(date_str)
+        else:
+            match_date = default_date or datetime.now().strftime("%Y-%m-%d")
+        
+        # Extract phase if available
+        phase = default_phase
+        phase_element = element.find_parent().find(['span', 'div'], class_=re.compile(r'round|stage|phase', re.I))
+        if phase_element:
+            phase = normalize_phase(phase_element.get_text(strip=True))
+        
+        # Determine season from date
+        if match_date:
+            year = int(match_date.split('-')[0])
+            month = int(match_date.split('-')[1])
+            if month >= 7:  # Season starts in July/August
+                season = f"{year}/{year + 1}"
+            else:
+                season = f"{year - 1}/{year}"
+        else:
+            season = "UNKNOWN"
+        
+        match_id = generate_match_id(
+            competition_code, season, phase, home_team, away_team, 
+            match_date or "2024-01-01"
+        )
+        
+        return {
+            "MATCH_ID": match_id,
+            "COMPETITION": competition_code,
+            "SEASON": season,
+            "PHASE": phase,
+            "MATCH_DATE": match_date or "2024-01-01",
+            "HOME_TEAM": home_team,
+            "AWAY_TEAM": away_team,
+            "HOME_GOALS": home_goals,
+            "AWAY_GOALS": away_goals
+        }
+        
+    except:
+        return None
+
+
+def extract_matches_from_html_structure(soup: BeautifulSoup, competition_code: str) -> List[Dict]:
+    """
+    Alternative method to extract matches by parsing HTML structure more broadly.
+    """
+    matches = []
+    
+    # Look for all text that contains score patterns
+    all_text = soup.get_text()
+    
+    # Find score patterns with context
+    score_pattern = re.compile(r'([A-Za-z\s]+?)\s+(\d+)\s*:\s*(\d+)\s+([A-Za-z\s]+)', re.MULTILINE)
+    
+    for match in score_pattern.finditer(all_text):
+        home_team = match.group(1).strip()
+        home_goals = int(match.group(2))
+        away_goals = int(match.group(3))
+        away_team = match.group(4).strip()
+        
+        # Basic validation
+        if (len(home_team) > 2 and len(away_team) > 2 and 
+            is_club_team(home_team) and is_club_team(away_team)):
+            
+            # Try to find date nearby in the HTML
+            match_date = datetime.now().strftime("%Y-%m-%d")
+            season = f"{datetime.now().year - 1}/{datetime.now().year}"
+            
+            match_id = generate_match_id(
+                competition_code, season, "UNKNOWN", home_team, away_team, match_date
+            )
+            
+            matches.append({
+                "MATCH_ID": match_id,
+                "COMPETITION": competition_code,
+                "SEASON": season,
+                "PHASE": "UNKNOWN",
+                "MATCH_DATE": match_date,
+                "HOME_TEAM": home_team,
+                "AWAY_TEAM": away_team,
+                "HOME_GOALS": home_goals,
+                "AWAY_GOALS": away_goals
+            })
+    
+    return matches
+
+
+def fetch_all_competitions(limit_per_competition: Optional[int] = None, 
+                          save_csv: bool = True) -> Dict[str, List[Dict]]:
+    """
+    Scrape matches from all three European club competitions.
+    
+    Args:
+        limit_per_competition: Maximum matches per competition (None for all)
+        save_csv: Whether to save CSV files for each competition
+    
+    Returns:
+        Dictionary with competition codes as keys and lists of matches as values
+    """
+    all_matches_by_competition = {}
+    all_matches = []
+    
+    for competition_code in COMPETITIONS.keys():
+        comp_config = COMPETITIONS[competition_code]
+        print(f"\n{'='*80}")
+        print(f"Scraping {comp_config['name']} ({competition_code})")
+        print(f"{'='*80}\n")
+        
+        matches = scrape_flashscore_competition(competition_code, limit_per_competition)
+        
+        # Final filter to ensure only club teams
+        club_matches = [
+            m for m in matches 
+            if is_club_team(m["HOME_TEAM"]) and is_club_team(m["AWAY_TEAM"])
+        ]
+        
+        # Sort matches by date descending
+        club_matches.sort(key=lambda x: x.get("MATCH_DATE", ""), reverse=True)
+        
+        all_matches_by_competition[competition_code] = club_matches
+        all_matches.extend(club_matches)
+        
+        print(f"✅ Retrieved {len(club_matches)} club matches from {comp_config['name']}\n")
+        
+        # Save CSV file for this competition
+        if save_csv and club_matches:
+            save_matches_to_csv(club_matches, competition_code)
+        
+        # Delay between competitions
+        time.sleep(3)
+    
+    return all_matches_by_competition
+
+
+def save_matches_to_csv(matches: List[Dict], competition_code: str, filename: Optional[str] = None) -> str:
+    """
+    Save matches to a CSV file.
+    
+    Args:
+        matches: List of match dictionaries
+        competition_code: Competition code (CL, EL, ECL)
+        filename: Optional custom filename (default: competition_code_matches.csv)
+    
+    Returns:
+        Path to the created CSV file
+    """
+    if not matches:
+        print(f"⚠️  No matches to save for {competition_code}")
+        return ""
+    
+    # Generate filename if not provided
+    if not filename:
+        comp_name = COMPETITIONS.get(competition_code, {}).get("name", competition_code)
+        # Clean filename (remove spaces, special chars)
+        safe_name = comp_name.replace(" ", "_").replace("-", "_").lower()
+        filename = f"{competition_code}_{safe_name}_matches.csv"
+    
+    # CSV column order matching database table structure
+    fieldnames = [
+        "MATCH_ID",
+        "COMPETITION",
+        "SEASON",
+        "PHASE",
+        "MATCH_DATE",
+        "HOME_TEAM",
+        "AWAY_TEAM",
+        "HOME_GOALS",
+        "AWAY_GOALS"
+    ]
+    
+    # Write CSV file
+    try:
+        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for match in matches:
+                # Ensure all fields are present
+                row = {field: match.get(field, '') for field in fieldnames}
+                writer.writerow(row)
+        
+        print(f"💾 Saved {len(matches)} matches to: {filename}")
+        return filename
+        
+    except Exception as e:
+        print(f"❌ Error saving CSV file {filename}: {e}")
+        return ""
+
+
+def print_matches_summary(matches: List[Dict]):
+    """Print a formatted summary of fetched matches."""
+    if not matches:
+        print("⚠️ No matches to display")
+        return
+    
+    print(f"\n{'='*80}")
+    print(f"SUMMARY: {len(matches)} Total Club Matches Retrieved")
+    print(f"{'='*80}\n")
+    
+    # Group by competition
+    by_competition = {}
+    for match in matches:
+        comp = match["COMPETITION"]
+        if comp not in by_competition:
+            by_competition[comp] = []
+        by_competition[comp].append(match)
+    
+    for comp_code, comp_matches in by_competition.items():
+        comp_name = COMPETITIONS.get(comp_code, {}).get("name", comp_code)
+        print(f"\n{comp_name} ({comp_code}): {len(comp_matches)} matches")
+        print("-" * 80)
+        
+        for match in comp_matches[:10]:  # Show first 10 per competition
+            print(
+                f"[{match['SEASON']} | {match['MATCH_DATE']} | {match['PHASE']}] "
+                f"{match['HOME_TEAM']} {match['HOME_GOALS']} - "
+                f"{match['AWAY_GOALS']} {match['AWAY_TEAM']}"
+            )
+        
+        if len(comp_matches) > 10:
+            print(f"... and {len(comp_matches) - 10} more matches")
+
+
+if __name__ == "__main__":
+    try:
+        print("=" * 80)
+        print("European Club Cups Data Scraper")
+        print("Scraping from FlashScore.com")
+        print("Champions League, Europa League, Conference League")
+        print("=" * 80)
+        print("ℹ️  Only CLUB teams are included - national teams are filtered out.\n")
+        print("⚠️  Note: This requires ChromeDriver to be installed.")
+        print("   Download from: https://chromedriver.chromium.org/\n")
+        print()
+        
+        # Scrape all competitions and save CSV files
+        matches_by_competition = fetch_all_competitions(limit_per_competition=None, save_csv=True)
+        
+        # Combine all matches for summary
+        all_matches = []
+        for comp_matches in matches_by_competition.values():
+            all_matches.extend(comp_matches)
+        
+        # Print summary
+        if all_matches:
+            print_matches_summary(all_matches)
+            print(f"\n✅ Total club matches ready for database: {len(all_matches)}")
+            print(f"\n📁 CSV files created:")
+            for comp_code, comp_matches in matches_by_competition.items():
+                if comp_matches:
+                    comp_name = COMPETITIONS.get(comp_code, {}).get("name", comp_code)
+                    safe_name = comp_name.replace(" ", "_").replace("-", "_").lower()
+                    filename = f"{comp_code}_{safe_name}_matches.csv"
+                    print(f"   - {filename} ({len(comp_matches)} matches)")
+        else:
+            print("\n⚠️  No matches were retrieved.")
+            print("   This could be due to:")
+            print("   - Website structure changes")
+            print("   - ChromeDriver not installed or not in PATH")
+            print("   - Network issues")
+            print("   - Anti-scraping measures")
+        
+    except Exception as e:
+        print(f"❌ Fatal Error: {e}")
+        import traceback
+        traceback.print_exc()
