@@ -1,0 +1,12 @@
+{
+    "account": "LQYQSMQ-MXC63237",
+    "user": "GLASSVONDALLE",
+    "password": "eAXjw!k!ALY4jBY",
+    "warehouse": "UCL_APUESTA_WH",
+    "database": "UCL_APUESTA_DB",
+    "schema": "UCL_APUESTA_SCHEMA",
+    "role": "",
+    "stage_name": "EUROPEAN_CUPS_STAGE",
+    "sql_file": "create_european_club_cups_objects.sql"
+}
+

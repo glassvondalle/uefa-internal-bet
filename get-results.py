@@ -24,15 +24,15 @@ import os
 
 # Competition configurations for FlashScore
 COMPETITIONS = {
-    "CL": {
+    "UCL": {
         "name": "Champions League",
         "flashscore_url": "https://www.flashscore.com/football/europe/champions-league/results/"
     },
-    "EL": {
+    "UEL": {
         "name": "Europa League",
         "flashscore_url": "https://www.flashscore.com/football/europe/europa-league/results/"
     },
-    "ECL": {
+    "UECL": {
         "name": "Conference League",
         "flashscore_url": "https://www.flashscore.com/football/europe/europa-conference-league/results/"
     }
@@ -109,24 +109,24 @@ def normalize_phase(phase_text: str) -> str:
     
     # Map common phase names
     phase_mapping = {
-        "group stage": "GROUP_STAGE",
-        "group": "GROUP_STAGE",
-        "group a": "GROUP_A",
-        "group b": "GROUP_B",
-        "group c": "GROUP_C",
-        "group d": "GROUP_D",
-        "group e": "GROUP_E",
-        "group f": "GROUP_F",
-        "group g": "GROUP_G",
-        "group h": "GROUP_H",
+        "league phase": "LEAGUE_PHASE",
+        "league": "LEAGUE_PHASE",
+        "group stage": "LEAGUE_PHASE",  # Legacy support
+        "group": "LEAGUE_PHASE",  # Legacy support
+        "knockout phase": "KNOCKOUT_PHASE",
+        "knockout": "KNOCKOUT_PHASE",
+        "ko phase": "KNOCKOUT_PHASE",
         "round of 16": "ROUND_OF_16",
-        "round of 32": "ROUND_OF_32",
+        "ro16": "ROUND_OF_16",
         "1/8 final": "ROUND_OF_16",
+        "round of 8": "QUARTER_FINAL",
+        "ro8": "QUARTER_FINAL",
         "1/4 final": "QUARTER_FINAL",
         "quarter": "QUARTER_FINAL",
         "quarter-final": "QUARTER_FINAL",
         "semi": "SEMI_FINAL",
         "semi-final": "SEMI_FINAL",
+        "semi final": "SEMI_FINAL",
         "final": "FINAL",
         "play-off": "PLAY_OFF",
         "playoff": "PLAY_OFF",
@@ -140,6 +140,152 @@ def normalize_phase(phase_text: str) -> str:
     
     # Clean and return uppercase version
     return re.sub(r'[^A-Z0-9_]', '_', phase_text.upper())[:30]
+
+
+def infer_phase_from_date(competition_code: str, match_date: str, season: str) -> str:
+    """
+    Infer the competition phase based on match date and competition code.
+    Uses the new format dates for European competitions.
+    
+    Args:
+        competition_code: UCL, UEL, or UECL
+        match_date: Date in YYYY-MM-DD format
+        season: Season in YYYY/YYYY format (e.g., "2024/2025")
+    
+    Returns:
+        Phase string (LEAGUE_PHASE, KNOCKOUT_PHASE, ROUND_OF_16, QUARTER_FINAL, SEMI_FINAL, FINAL)
+    """
+    if not match_date or match_date == "2024-01-01":
+        return "UNKNOWN"
+    
+    try:
+        # Parse the date
+        match_dt = datetime.strptime(match_date, "%Y-%m-%d")
+        year = match_dt.year
+        month = match_dt.month
+        day = match_dt.day
+        
+        # Extract season year (first year of the season)
+        season_year = int(season.split('/')[0])
+        
+        # UCL (Champions League) dates
+        if competition_code == "UCL":
+            # League phase: Sept 16 - Jan 28, 2026
+            league_start = datetime(season_year, 9, 16)
+            league_end = datetime(season_year + 1, 1, 28)
+            
+            # KO phase: Feb 17-25
+            ko_start = datetime(season_year + 1, 2, 17)
+            ko_end = datetime(season_year + 1, 2, 25)
+            
+            # RO16: Mar 10-18
+            ro16_start = datetime(season_year + 1, 3, 10)
+            ro16_end = datetime(season_year + 1, 3, 18)
+            
+            # RO8 (Quarter): Apr 7-15
+            ro8_start = datetime(season_year + 1, 4, 7)
+            ro8_end = datetime(season_year + 1, 4, 15)
+            
+            # Semi: Apr 28 - May 6
+            semi_start = datetime(season_year + 1, 4, 28)
+            semi_end = datetime(season_year + 1, 5, 6)
+            
+            # Final: May 30
+            final_date = datetime(season_year + 1, 5, 30)
+            
+            if league_start <= match_dt <= league_end:
+                return "LEAGUE_PHASE"
+            elif ko_start <= match_dt <= ko_end:
+                return "KNOCKOUT_PHASE"
+            elif ro16_start <= match_dt <= ro16_end:
+                return "ROUND_OF_16"
+            elif ro8_start <= match_dt <= ro8_end:
+                return "QUARTER_FINAL"
+            elif semi_start <= match_dt <= semi_end:
+                return "SEMI_FINAL"
+            elif match_dt.date() == final_date.date():
+                return "FINAL"
+        
+        # UEL (Europa League) dates
+        elif competition_code == "UEL":
+            # KO: Feb 19-25
+            ko_start = datetime(season_year + 1, 2, 19)
+            ko_end = datetime(season_year + 1, 2, 25)
+            
+            # RO16: Mar 12-19
+            ro16_start = datetime(season_year + 1, 3, 12)
+            ro16_end = datetime(season_year + 1, 3, 19)
+            
+            # RO8: Apr 9-16
+            ro8_start = datetime(season_year + 1, 4, 9)
+            ro8_end = datetime(season_year + 1, 4, 16)
+            
+            # Semi: Apr 30 - May 7
+            semi_start = datetime(season_year + 1, 4, 30)
+            semi_end = datetime(season_year + 1, 5, 7)
+            
+            # Final: May 20
+            final_date = datetime(season_year + 1, 5, 20)
+            
+            # League phase: Sept 16 - Jan 28 (same as UCL)
+            league_start = datetime(season_year, 9, 16)
+            league_end = datetime(season_year + 1, 1, 28)
+            
+            if league_start <= match_dt <= league_end:
+                return "LEAGUE_PHASE"
+            elif ko_start <= match_dt <= ko_end:
+                return "KNOCKOUT_PHASE"
+            elif ro16_start <= match_dt <= ro16_end:
+                return "ROUND_OF_16"
+            elif ro8_start <= match_dt <= ro8_end:
+                return "QUARTER_FINAL"
+            elif semi_start <= match_dt <= semi_end:
+                return "SEMI_FINAL"
+            elif match_dt.date() == final_date.date():
+                return "FINAL"
+        
+        # UECL (Conference League) dates - same as UEL except final
+        elif competition_code == "UECL":
+            # KO: Feb 19-25
+            ko_start = datetime(season_year + 1, 2, 19)
+            ko_end = datetime(season_year + 1, 2, 25)
+            
+            # RO16: Mar 12-19
+            ro16_start = datetime(season_year + 1, 3, 12)
+            ro16_end = datetime(season_year + 1, 3, 19)
+            
+            # RO8: Apr 9-16
+            ro8_start = datetime(season_year + 1, 4, 9)
+            ro8_end = datetime(season_year + 1, 4, 16)
+            
+            # Semi: Apr 30 - May 7
+            semi_start = datetime(season_year + 1, 4, 30)
+            semi_end = datetime(season_year + 1, 5, 7)
+            
+            # Final: May 27 (different from UEL)
+            final_date = datetime(season_year + 1, 5, 27)
+            
+            # League phase: Sept 16 - Jan 28 (same as UCL)
+            league_start = datetime(season_year, 9, 16)
+            league_end = datetime(season_year + 1, 1, 28)
+            
+            if league_start <= match_dt <= league_end:
+                return "LEAGUE_PHASE"
+            elif ko_start <= match_dt <= ko_end:
+                return "KNOCKOUT_PHASE"
+            elif ro16_start <= match_dt <= ro16_end:
+                return "ROUND_OF_16"
+            elif ro8_start <= match_dt <= ro8_end:
+                return "QUARTER_FINAL"
+            elif semi_start <= match_dt <= semi_end:
+                return "SEMI_FINAL"
+            elif match_dt.date() == final_date.date():
+                return "FINAL"
+        
+        return "UNKNOWN"
+        
+    except Exception as e:
+        return "UNKNOWN"
 
 
 def parse_date(date_str: str) -> Optional[str]:
@@ -171,12 +317,34 @@ def parse_date(date_str: str) -> Optional[str]:
         except:
             continue
     
-    # Try to extract date from string with regex
+    # Try to extract date from string with regex (with year)
     date_match = re.search(r'(\d{1,2})[./](\d{1,2})[./](\d{4})', date_str)
     if date_match:
         day, month, year = date_match.groups()
         try:
             dt = datetime(int(year), int(month), int(day))
+            return dt.strftime("%Y-%m-%d")
+        except:
+            pass
+    
+    # Try DD.MM format (without year) - infer year
+    date_match = re.search(r'(\d{1,2})\.(\d{1,2})(?!\.)', date_str)
+    if date_match:
+        day, month = date_match.groups()
+        try:
+            current_year = datetime.now().year
+            # If month is in future, likely previous year
+            if int(month) > datetime.now().month:
+                year = current_year - 1
+            else:
+                year = current_year
+            
+            dt = datetime(year, int(month), int(day))
+            # If date is too far in future, it's probably previous year
+            if dt > datetime.now():
+                year = year - 1
+                dt = datetime(year, int(month), int(day))
+            
             return dt.strftime("%Y-%m-%d")
         except:
             pass
@@ -213,7 +381,7 @@ def scrape_flashscore_competition(competition_code: str, limit: Optional[int] = 
     Scrape match results from FlashScore for a competition.
     
     Args:
-        competition_code: CL, EL, or ECL
+        competition_code: UCL, UEL, or UECL
         limit: Maximum number of matches to return (None for all)
     
     Returns:
@@ -475,27 +643,71 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                     print(f"   ⚠️  No score found. Text: {full_text[:200]}")
                 continue
             
-            # Extract date - FlashScore uses event__time or event__date
-            match_date = current_date
-            date_elements = match_element.find_all(['span', 'div'], 
-                                                   class_=re.compile(r'event__time|event__date|time|date', re.I))
+            # Extract date - FlashScore format is typically DD.MM or DD.MM.YYYY
+            # From debug output: "Ath Bilbao | PSG | 0 | 0 | 10.12...."
+            # Date appears after the scores in pipe-separated format
+            match_date = None
+            parent = match_element.find_parent()  # Initialize parent early so it's available for phase extraction later
             
-            # Also check parent and siblings for date
-            parent = match_element.find_parent()
-            if parent and not date_elements:
-                date_elements = parent.find_all(['span', 'div'], 
-                                               class_=re.compile(r'event__time|event__date|time|date', re.I))
+            # Method 1: Parse from the pipe-separated text (date is usually after scores)
+            # Format: Team1 | Team2 | Score1 | Score2 | Date
+            parts = [p.strip() for p in full_text.split('|')]
+            for part in parts:
+                # Look for date pattern DD.MM or DD.MM.YYYY
+                date_match = re.search(r'(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?', part)
+                if date_match:
+                    day, month, year = date_match.groups()
+                    if year:
+                        # Full date with year
+                        try:
+                            match_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                            current_date = match_date
+                            break
+                        except:
+                            pass
+                    else:
+                        # Date without year - infer from current date and season
+                        try:
+                            current_year = datetime.now().year
+                            # If month is in future (like 12 for December), might be previous year
+                            # For European competitions, matches are usually in current season
+                            if int(month) > datetime.now().month:
+                                # Likely previous year
+                                year = current_year - 1
+                            else:
+                                year = current_year
+                            
+                            # Try to create the date
+                            test_date = datetime(year, int(month), int(day))
+                            # If date is too far in future, it's probably previous year
+                            if test_date > datetime.now():
+                                year = year - 1
+                            
+                            match_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                            current_date = match_date
+                            break
+                        except:
+                            pass
             
-            if date_elements:
-                date_str = date_elements[0].get_text(strip=True)
-                parsed_date = parse_date(date_str)
-                if parsed_date:
-                    match_date = parsed_date
-                    current_date = parsed_date
-            
+            # Method 2: Look in FlashScore date elements
             if not match_date:
-                # Try to find date in the full text
-                full_text = match_element.get_text(separator=' ', strip=True)
+                date_elements = match_element.find_all(['span', 'div'], 
+                                                       class_=re.compile(r'event__time|event__date|time|date', re.I))
+                
+                # Also check parent and siblings for date
+                if parent and not date_elements:
+                    date_elements = parent.find_all(['span', 'div'], 
+                                                   class_=re.compile(r'event__time|event__date|time|date', re.I))
+                
+                if date_elements:
+                    date_str = date_elements[0].get_text(strip=True)
+                    parsed_date = parse_date(date_str)
+                    if parsed_date:
+                        match_date = parsed_date
+                        current_date = parsed_date
+            
+            # Method 3: Look for date pattern in full text (DD.MM.YYYY format)
+            if not match_date:
                 date_match = re.search(r'(\d{1,2})[./](\d{1,2})[./](\d{4})', full_text)
                 if date_match:
                     day, month, year = date_match.groups()
@@ -503,8 +715,36 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                         match_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
                         current_date = match_date
                     except:
-                        match_date = datetime.now().strftime("%Y-%m-%d")
+                        pass
+            
+            # Method 4: Look for DD.MM format without year
+            if not match_date:
+                date_match = re.search(r'(\d{1,2})\.(\d{1,2})(?!\.)', full_text)
+                if date_match:
+                    day, month = date_match.groups()
+                    try:
+                        current_year = datetime.now().year
+                        # Infer year based on month
+                        if int(month) > datetime.now().month:
+                            year = current_year - 1
+                        else:
+                            year = current_year
+                        
+                        test_date = datetime(year, int(month), int(day))
+                        if test_date > datetime.now():
+                            year = year - 1
+                        
+                        match_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+                        current_date = match_date
+                    except:
+                        pass
+            
+            # Fallback: use current_date from previous match or current date
+            if not match_date:
+                if current_date:
+                    match_date = current_date
                 else:
+                    # Last resort: use current date (but this shouldn't happen often)
                     match_date = datetime.now().strftime("%Y-%m-%d")
             
             # Extract phase - look for round/stage information
@@ -534,6 +774,13 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                     season = f"{datetime.now().year - 1}/{datetime.now().year}"
             else:
                 season = f"{datetime.now().year - 1}/{datetime.now().year}"
+            
+            # If phase is still UNKNOWN, try to infer it from the match date
+            if phase == "UNKNOWN" and match_date and match_date != "2024-01-01":
+                inferred_phase = infer_phase_from_date(competition_code, match_date, season)
+                if inferred_phase != "UNKNOWN":
+                    phase = inferred_phase
+                    current_phase = phase  # Update current_phase so subsequent matches can use it
             
             # Only add if both teams are clubs
             if is_club_team(home_team) and is_club_team(away_team):
@@ -638,6 +885,12 @@ def extract_match_from_flashscore_element(element, competition_code: str,
         else:
             season = "UNKNOWN"
         
+        # If phase is still UNKNOWN, try to infer it from the match date
+        if phase == "UNKNOWN" and match_date and match_date != "2024-01-01":
+            inferred_phase = infer_phase_from_date(competition_code, match_date, season)
+            if inferred_phase != "UNKNOWN":
+                phase = inferred_phase
+        
         match_id = generate_match_id(
             competition_code, season, phase, home_team, away_team, 
             match_date or "2024-01-01"
@@ -685,15 +938,18 @@ def extract_matches_from_html_structure(soup: BeautifulSoup, competition_code: s
             match_date = datetime.now().strftime("%Y-%m-%d")
             season = f"{datetime.now().year - 1}/{datetime.now().year}"
             
+            # Try to infer phase from date
+            phase = infer_phase_from_date(competition_code, match_date, season)
+            
             match_id = generate_match_id(
-                competition_code, season, "UNKNOWN", home_team, away_team, match_date
+                competition_code, season, phase, home_team, away_team, match_date
             )
             
             matches.append({
                 "MATCH_ID": match_id,
                 "COMPETITION": competition_code,
                 "SEASON": season,
-                "PHASE": "UNKNOWN",
+                "PHASE": phase,
                 "MATCH_DATE": match_date,
                 "HOME_TEAM": home_team,
                 "AWAY_TEAM": away_team,
@@ -757,7 +1013,7 @@ def save_matches_to_csv(matches: List[Dict], competition_code: str, filename: Op
     
     Args:
         matches: List of match dictionaries
-        competition_code: Competition code (CL, EL, ECL)
+        competition_code: Competition code (UCL, UEL, UECL)
         filename: Optional custom filename (default: competition_code_matches.csv)
     
     Returns:
