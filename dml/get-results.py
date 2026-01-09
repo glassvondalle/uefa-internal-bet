@@ -21,6 +21,7 @@ import re
 import time
 import csv
 import os
+from pathlib import Path
 
 # Competition configurations for FlashScore
 COMPETITIONS = {
@@ -552,6 +553,9 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
             if len(participants) >= 2:
                 home_team = participants[0].get_text(strip=True)
                 away_team = participants[1].get_text(strip=True)
+                # Ensure they're different (sometimes DOM can have duplicates)
+                if home_team == away_team and len(participants) >= 3:
+                    away_team = participants[2].get_text(strip=True)
             
             # Method 2: Parse from pipe-separated text format "Team1 | Team2 | Score1 | Score2"
             if not home_team or not away_team:
@@ -567,19 +571,48 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                                 break
                 
                 if len(team_candidates) >= 2:
-                    home_team = team_candidates[0]
-                    away_team = team_candidates[1]
+                    # Only set if not already set, and ensure they're different
+                    if not home_team:
+                        home_team = team_candidates[0]
+                    if not away_team:
+                        # Make sure away_team is different from home_team
+                        if team_candidates[1] != home_team:
+                            away_team = team_candidates[1]
+                        elif len(team_candidates) > 2 and team_candidates[2] != home_team:
+                            away_team = team_candidates[2]
+                        else:
+                            # If all candidates are the same, try the first candidate again
+                            away_team = team_candidates[1] if len(team_candidates) > 1 else team_candidates[0]
             
             # Method 3: Look for any element with team-like text
             if not home_team or not away_team:
                 all_text_elements = match_element.find_all(['span', 'div', 'a'])
                 # Filter for elements with substantial text (likely team names)
-                text_elements = [e for e in all_text_elements 
-                               if e.get_text(strip=True) and len(e.get_text(strip=True)) > 3 
-                               and not e.get_text(strip=True).isdigit()]
+                # Also remove duplicates and parent/child duplicates
+                seen_texts = set()
+                text_elements = []
+                for e in all_text_elements:
+                    text = e.get_text(strip=True)
+                    if text and len(text) > 3 and not text.isdigit():
+                        # Only add if we haven't seen this text before
+                        if text not in seen_texts:
+                            seen_texts.add(text)
+                            text_elements.append(e)
+                        if len(text_elements) >= 2:
+                            break
+                
                 if len(text_elements) >= 2:
-                    home_team = text_elements[0].get_text(strip=True)
-                    away_team = text_elements[1].get_text(strip=True)
+                    home_team_text = text_elements[0].get_text(strip=True)
+                    away_team_text = text_elements[1].get_text(strip=True)
+                    # Only set if not already set and they're different
+                    if not home_team:
+                        home_team = home_team_text
+                    if not away_team and away_team_text != home_team:
+                        away_team = away_team_text
+                    elif not away_team:
+                        # If they're the same, try next element
+                        if len(text_elements) >= 3:
+                            away_team = text_elements[2].get_text(strip=True)
             
             if not home_team or not away_team:
                 no_teams += 1
@@ -593,8 +626,31 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
             away_team = re.sub(r'^\d+\.?\s*', '', away_team).strip()
             away_team = re.sub(r'\s+', ' ', away_team)
             
+            # Final check: if teams are the same, try to fix from pipe-separated text
+            if home_team == away_team and home_team:
+                # Try to extract again from pipe-separated format
+                parts = [p.strip() for p in full_text.split('|')]
+                team_candidates = []
+                for part in parts:
+                    if not part.isdigit() and not re.match(r'^\d{1,2}\.\d{1,2}', part):
+                        if len(part) > 2 and part not in team_candidates:
+                            team_candidates.append(part)
+                            if len(team_candidates) >= 2:
+                                break
+                
+                if len(team_candidates) >= 2:
+                    home_team = team_candidates[0]
+                    away_team = team_candidates[1]
+            
             if len(home_team) < 2 or len(away_team) < 2:
                 no_teams += 1
+                continue
+            
+            # Final validation: teams must be different
+            if home_team == away_team:
+                no_teams += 1
+                if no_teams <= 3:
+                    print(f"   ⚠️  Teams are the same: {home_team} vs {away_team}. Text: {full_text[:200]}")
                 continue
             
             # Extract score - FlashScore format can be "2:2" or "2 | 2" or just "2 2"
@@ -1009,7 +1065,7 @@ def fetch_all_competitions(limit_per_competition: Optional[int] = None,
 
 def save_matches_to_csv(matches: List[Dict], competition_code: str, filename: Optional[str] = None) -> str:
     """
-    Save matches to a CSV file.
+    Save matches to a CSV file in the FILES directory at root level.
     
     Args:
         matches: List of match dictionaries
@@ -1023,12 +1079,23 @@ def save_matches_to_csv(matches: List[Dict], competition_code: str, filename: Op
         print(f"⚠️  No matches to save for {competition_code}")
         return ""
     
+    # Get the script directory and create files folder at same level
+    script_dir = Path(__file__).parent.absolute()
+    # files folder should be at the same level as the script's folder
+    # e.g., if script is in DML/, files should be in files/ at same level
+    parent_dir = script_dir.parent
+    files_dir = parent_dir / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    
     # Generate filename if not provided
     if not filename:
         comp_name = COMPETITIONS.get(competition_code, {}).get("name", competition_code)
         # Clean filename (remove spaces, special chars)
         safe_name = comp_name.replace(" ", "_").replace("-", "_").lower()
         filename = f"{competition_code}_{safe_name}_matches.csv"
+    
+    # Full path to the CSV file
+    file_path = files_dir / filename
     
     # CSV column order matching database table structure
     fieldnames = [
@@ -1045,7 +1112,7 @@ def save_matches_to_csv(matches: List[Dict], competition_code: str, filename: Op
     
     # Write CSV file
     try:
-        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+        with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
             
@@ -1054,11 +1121,11 @@ def save_matches_to_csv(matches: List[Dict], competition_code: str, filename: Op
                 row = {field: match.get(field, '') for field in fieldnames}
                 writer.writerow(row)
         
-        print(f"💾 Saved {len(matches)} matches to: {filename}")
-        return filename
+        print(f"💾 Saved {len(matches)} matches to: {file_path}")
+        return str(file_path)
         
     except Exception as e:
-        print(f"❌ Error saving CSV file {filename}: {e}")
+        print(f"❌ Error saving CSV file {file_path}: {e}")
         return ""
 
 
