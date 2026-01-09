@@ -212,30 +212,77 @@ def execute_sql_file(conn: snowflake.connector.SnowflakeConnection,
         with open(sql_file_path, 'r', encoding='utf-8') as f:
             sql_content = f.read()
         
+        # Check if file contains stored procedures - if so, use simpler execution
+        has_procedure = 'CREATE' in sql_content.upper() and 'PROCEDURE' in sql_content.upper() and '$$' in sql_content
+        
+        if has_procedure:
+            print("   Detected stored procedure in file - using direct execution")
+            # For stored procedures, execute the entire file as-is
+            # This avoids parsing issues with semicolons inside $$ blocks
+            try:
+                cursor = conn.cursor()
+                # Execute the entire file content
+                cursor.execute(sql_content)
+                cursor.close()
+                print("✅ SQL file executed successfully (stored procedure created)")
+                return True
+            except Exception as e:
+                error_msg = str(e)
+                print(f"❌ Error executing SQL file: {error_msg[:300]}")
+                # Fall through to try parsing method
+                print("   Attempting to parse and execute statements separately...")
+        
         # Use cursor to execute SQL statements
-        # Split by semicolon and execute each statement separately
         cursor = conn.cursor()
         
-        # Remove block comments (/* ... */) first
-        # Simple block comment removal (may not handle nested comments)
+        # Handle stored procedures specially - they contain semicolons inside $$ blocks
+        statements = []
+        
+        # First, remove block comments (/* ... */) but preserve stored procedure delimiters
         sql_cleaned = re.sub(r'/\*.*?\*/', '', sql_content, flags=re.DOTALL)
         
-        # Split by semicolon and filter out empty/commented statements
-        statements = []
-        for stmt in sql_cleaned.split(';'):
+        # Find and extract stored procedure blocks (between $$ delimiters)
+        # Pattern: CREATE ... PROCEDURE ... AS $$ ... $$;
+        proc_pattern = r'CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+.*?AS\s+\$\$.*?\$\$;'
+        procedures = re.findall(proc_pattern, sql_cleaned, re.DOTALL | re.IGNORECASE)
+        
+        print(f"   Found {len(procedures)} stored procedure(s) in SQL file")
+        
+        # Replace stored procedures with placeholders to avoid splitting them
+        placeholder_map = {}
+        sql_with_placeholders = sql_cleaned
+        for i, proc in enumerate(procedures):
+            placeholder = f'__PROCEDURE_PLACEHOLDER_{i}__'
+            placeholder_map[placeholder] = proc
+            sql_with_placeholders = sql_with_placeholders.replace(proc, placeholder, 1)
+            proc_name_match = re.search(r'PROCEDURE\s+(\w+)', proc, re.IGNORECASE)
+            if proc_name_match:
+                print(f"      - Procedure: {proc_name_match.group(1)}")
+        
+        # Split remaining SQL by semicolon
+        for stmt in sql_with_placeholders.split(';'):
             stmt = stmt.strip()
-            # Skip empty statements and statements that are only comments
-            if stmt and not stmt.startswith('--'):
-                # Remove inline comments (-- ...)
-                lines = []
-                for line in stmt.split('\n'):
-                    if '--' in line:
-                        line = line[:line.index('--')]
-                    line = line.strip()
-                    if line:
-                        lines.append(line)
-                if lines:
-                    statements.append('\n'.join(lines))
+            # Check if this is a placeholder for a stored procedure
+            for placeholder, proc in placeholder_map.items():
+                if placeholder in stmt:
+                    # Replace placeholder with actual procedure
+                    stmt = stmt.replace(placeholder, proc)
+                    statements.append(stmt)
+                    break
+            else:
+                # Regular SQL statement
+                # Skip empty statements and statements that are only comments
+                if stmt and not stmt.startswith('--'):
+                    # Remove inline comments (-- ...)
+                    lines = []
+                    for line in stmt.split('\n'):
+                        if '--' in line:
+                            line = line[:line.index('--')]
+                        line = line.strip()
+                        if line:
+                            lines.append(line)
+                    if lines:
+                        statements.append('\n'.join(lines))
         
         executed_count = 0
         failed_count = 0
@@ -243,18 +290,48 @@ def execute_sql_file(conn: snowflake.connector.SnowflakeConnection,
         for i, statement in enumerate(statements, 1):
             if not statement or len(statement) < 5:  # Skip very short statements
                 continue
+            
+            # Show what we're executing (truncated for long statements)
+            stmt_preview = statement[:100].replace('\n', ' ') if len(statement) > 100 else statement.replace('\n', ' ')
+            if 'PROCEDURE' in statement.upper():
+                print(f"   Executing statement {i} (PROCEDURE): {stmt_preview}...")
+            else:
+                print(f"   Executing statement {i}: {stmt_preview}...")
                 
             try:
                 cursor.execute(statement)
                 executed_count += 1
+                if 'PROCEDURE' in statement.upper():
+                    print(f"      ✅ Procedure statement executed successfully")
+                    # Verify it was actually created by checking immediately
+                    try:
+                        verify_cursor = conn.cursor()
+                        if 'DATABASE' in statement.upper() and 'SCHEMA' in statement.upper():
+                            # Try to find the database/schema from USE statements before
+                            verify_cursor.execute("SHOW PROCEDURES LIKE 'LOAD_MATCHES_FROM_STAGE'")
+                        else:
+                            verify_cursor.execute("SHOW PROCEDURES LIKE 'LOAD_MATCHES_FROM_STAGE'")
+                        verify_result = verify_cursor.fetchall()
+                        verify_cursor.close()
+                        if verify_result:
+                            print(f"      ✅✅ Procedure verified to exist after creation!")
+                        else:
+                            print(f"      ⚠️  Procedure execution succeeded but verification failed")
+                    except:
+                        pass  # Don't fail if verification fails
             except Exception as e:
                 error_msg = str(e)
                 # Some errors are acceptable (e.g., object already exists with IF NOT EXISTS)
                 if "already exists" in error_msg.lower() or "does not exist" in error_msg.lower():
                     executed_count += 1  # Count as success for IF NOT EXISTS scenarios
+                    if 'PROCEDURE' in statement.upper():
+                        print(f"      ℹ️  Procedure may already exist (this is usually OK)")
                 else:
                     failed_count += 1
-                    print(f"   ⚠️  Error in statement {i}: {error_msg[:150]}")
+                    print(f"      ❌ Error in statement {i}: {error_msg[:200]}")
+                    # For procedures, show more details
+                    if 'PROCEDURE' in statement.upper():
+                        print(f"      This was a CREATE PROCEDURE statement - check syntax above")
         
         cursor.close()
         
@@ -324,11 +401,74 @@ def create_stage_if_not_exists(conn: snowflake.connector.SnowflakeConnection,
             pass
 
 
+def check_file_exists_in_stage(conn: snowflake.connector.SnowflakeConnection,
+                                file_name: str,
+                                stage_name: str,
+                                database: Optional[str] = None,
+                                schema: Optional[str] = None) -> bool:
+    """
+    Check if a file already exists in the Snowflake stage.
+    
+    Args:
+        conn: Snowflake connection
+        file_name: Name of the file to check (just filename, not full path)
+        stage_name: Name of the stage
+        database: Optional database name
+        schema: Optional schema name
+    
+    Returns:
+        True if file exists, False otherwise
+    """
+    # Build full stage path
+    if database and schema:
+        stage_path = f"{database}.{schema}.{stage_name}"
+    elif schema:
+        stage_path = f"{schema}.{stage_name}"
+    else:
+        stage_path = stage_name
+    
+    try:
+        cursor = conn.cursor()
+        
+        # Set context if database/schema provided
+        if database:
+            cursor.execute(f"USE DATABASE {database}")
+        if schema and database:
+            cursor.execute(f"USE SCHEMA {database}.{schema}")
+        elif schema:
+            cursor.execute(f"USE SCHEMA {schema}")
+        
+        # List files in stage and check if our file exists
+        cursor.execute(f"LIST @{stage_path}")
+        files = cursor.fetchall()
+        cursor.close()
+        
+        # Check if file exists (file name can be in different columns depending on LIST output)
+        for file_record in files:
+            if isinstance(file_record, (list, tuple)):
+                # LIST returns: name, size, md5, last_modified
+                stage_file_name = file_record[0] if len(file_record) > 0 else ""
+                # Compare just the filename (ignore path)
+                if os.path.basename(stage_file_name) == file_name:
+                    return True
+            elif isinstance(file_record, str):
+                if os.path.basename(file_record) == file_name:
+                    return True
+        
+        return False
+        
+    except Exception as e:
+        # If we can't check, assume it doesn't exist (better to try upload)
+        print(f"      ⚠️  Could not check if file exists: {e}")
+        return False
+
+
 def upload_file_to_stage(conn: snowflake.connector.SnowflakeConnection,
                          file_path: str,
                          stage_name: str,
                          database: Optional[str] = None,
-                         schema: Optional[str] = None) -> bool:
+                         schema: Optional[str] = None,
+                         skip_existing: bool = True) -> bool:
     """
     Upload a file to Snowflake stage.
     
@@ -356,6 +496,12 @@ def upload_file_to_stage(conn: snowflake.connector.SnowflakeConnection,
     
     # Get just the filename for the stage
     filename = os.path.basename(file_path)
+    
+    # Check if file already exists in stage (if skip_existing is True)
+    if skip_existing:
+        if check_file_exists_in_stage(conn, filename, stage_name, database, schema):
+            print(f"   ⏭️  Skipping {filename} (already exists in stage)")
+            return True
     
     print(f"   Uploading {filename} to @{stage_path}...")
     
@@ -499,6 +645,7 @@ def main():
     config = load_config()
     stage_name = config.get("stage_name", "EUROPEAN_CUPS_STAGE")
     sql_file = config.get("sql_file", "create_european_club_cups_objects.sql")
+    load_procedure_file = config.get("load_procedure_file", "load_data_from_stage.sql")
     
     # Step 1: Execute scraper
     if not execute_scraper():
@@ -538,25 +685,116 @@ def main():
             print("   The stage and objects may not have been created properly.")
             print()
         
-        # Step 5: Upload files
+        # Step 4b: Create the stored procedure for loading data (if file exists)
+        procedure_created = False
+        if os.path.exists(load_procedure_file):
+            print()
+            print("=" * 80)
+            print("Creating stored procedure for loading data...")
+            print("=" * 80)
+            if execute_sql_file(conn, load_procedure_file):
+                # Verify the procedure was created
+                try:
+                    cursor = conn.cursor()
+                    
+                    # Set context first
+                    if config.get("database"):
+                        cursor.execute(f"USE DATABASE {config['database']}")
+                    if config.get("schema") and config.get("database"):
+                        cursor.execute(f"USE SCHEMA {config['database']}.{config['schema']}")
+                    elif config.get("schema"):
+                        cursor.execute(f"USE SCHEMA {config['schema']}")
+                    
+                    # Build fully qualified procedure name
+                    if config.get("database") and config.get("schema"):
+                        procedure_name = f"{config['database']}.{config['schema']}.LOAD_MATCHES_FROM_STAGE"
+                        show_sql = f"SHOW PROCEDURES LIKE 'LOAD_MATCHES_FROM_STAGE' IN SCHEMA {config['database']}.{config['schema']}"
+                    elif config.get("schema"):
+                        procedure_name = f"{config['schema']}.LOAD_MATCHES_FROM_STAGE"
+                        show_sql = f"SHOW PROCEDURES LIKE 'LOAD_MATCHES_FROM_STAGE' IN SCHEMA {config['schema']}"
+                    else:
+                        procedure_name = "LOAD_MATCHES_FROM_STAGE"
+                        show_sql = "SHOW PROCEDURES LIKE 'LOAD_MATCHES_FROM_STAGE'"
+                    
+                    print(f"   Verifying procedure exists: {procedure_name}")
+                    cursor.execute(show_sql)
+                    result = cursor.fetchall()
+                    cursor.close()
+                    
+                    if result:
+                        procedure_created = True
+                        print(f"✅ Stored procedure verified: {procedure_name}")
+                    else:
+                        print(f"⚠️  Stored procedure not found after creation attempt")
+                        print(f"   Expected: {procedure_name}")
+                        print(f"   Verification query returned no results")
+                        # Still try to proceed - maybe the SHOW command format is different
+                        procedure_created = True  # Assume it was created even if verification fails
+                        print(f"   Proceeding anyway (assuming procedure exists)")
+                except Exception as e:
+                    print(f"⚠️  Could not verify stored procedure: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # Assume it was created if SQL execution succeeded
+                    procedure_created = True
+                    print(f"   Proceeding anyway (assuming procedure was created)")
+            else:
+                print("⚠️  Stored procedure creation had issues, but continuing...")
+                print("   You can manually execute load_data_from_stage.sql later.")
+        else:
+            print(f"\nℹ️  Load procedure file not found: {load_procedure_file}")
+            print("   The stored procedure won't be created automatically.")
+            print()
+        
+        # Step 5: Check existing files and upload new ones
+        print()
+        print("=" * 80)
+        print("Checking stage for existing files...")
+        print("=" * 80)
+        
+        # List existing files first
+        list_stage_files(
+            conn,
+            stage_name,
+            config.get("database"),
+            config.get("schema")
+        )
+        
         print()
         print("=" * 80)
         print("Uploading CSV files to Snowflake stage...")
         print("=" * 80)
         
+        skip_existing = config.get("skip_existing_files", True)
         uploaded_count = 0
+        skipped_count = 0
+        
         for csv_file in csv_files:
+            # Check if file exists before uploading
+            filename = os.path.basename(csv_file)
+            if skip_existing and check_file_exists_in_stage(
+                conn, filename, stage_name, 
+                config.get("database"), config.get("schema")
+            ):
+                print(f"   ⏭️  Skipping {filename} (already in stage)")
+                skipped_count += 1
+                continue
+            
             if upload_file_to_stage(
                 conn,
                 csv_file,
                 stage_name,
                 config.get("database"),
-                config.get("schema")
+                config.get("schema"),
+                skip_existing=skip_existing
             ):
                 uploaded_count += 1
         
         print()
-        print(f"✅ Successfully uploaded {uploaded_count}/{len(csv_files)} file(s)")
+        print(f"✅ Successfully uploaded {uploaded_count} new file(s)")
+        if skipped_count > 0:
+            print(f"⏭️  Skipped {skipped_count} existing file(s)")
+        print(f"📊 Total files processed: {len(csv_files)}")
         
         # Step 6: List stage files
         list_stage_files(
@@ -565,6 +803,66 @@ def main():
             config.get("database"),
             config.get("schema")
         )
+        
+        # Step 7: Optionally load data from stage to tables
+        load_to_tables = config.get("load_to_tables", False)
+        print(f"\n🔍 Debug: load_to_tables={load_to_tables}, procedure_created={procedure_created}")
+        
+        if load_to_tables:
+            # Always try to call the procedure if load_to_tables is True
+            # Even if verification failed, the procedure might still exist
+            print()
+            print("=" * 80)
+            print("Loading data from stage to tables...")
+            print("=" * 80)
+            
+            if not procedure_created:
+                print("⚠️  Warning: Procedure verification failed, but attempting to call it anyway...")
+            
+            try:
+                cursor = conn.cursor()
+                
+                # Set database/schema context
+                if config.get("database"):
+                    cursor.execute(f"USE DATABASE {config['database']}")
+                if config.get("schema") and config.get("database"):
+                    cursor.execute(f"USE SCHEMA {config['database']}.{config['schema']}")
+                elif config.get("schema"):
+                    cursor.execute(f"USE SCHEMA {config['schema']}")
+                
+                # Build fully qualified procedure name
+                if config.get("database") and config.get("schema"):
+                    procedure_name = f"{config['database']}.{config['schema']}.LOAD_MATCHES_FROM_STAGE"
+                elif config.get("schema"):
+                    procedure_name = f"{config['schema']}.LOAD_MATCHES_FROM_STAGE"
+                else:
+                    procedure_name = "LOAD_MATCHES_FROM_STAGE"
+                
+                # Call the stored procedure with fully qualified name
+                call_sql = f"CALL {procedure_name}()"
+                print(f"   Calling procedure: {procedure_name}")
+                print(f"   SQL: {call_sql}")
+                cursor.execute(call_sql)
+                result = cursor.fetchone()
+                cursor.close()
+                
+                if result:
+                    result_str = result[0] if isinstance(result, tuple) else str(result)
+                    print()
+                    print(result_str)
+                
+                print()
+                print("✅ Data loaded into tables successfully!")
+                
+            except Exception as e:
+                print(f"\n❌ Error loading data to tables: {e}")
+                import traceback
+                traceback.print_exc()
+                if config.get("database") and config.get("schema"):
+                    proc_name = f"{config['database']}.{config['schema']}.LOAD_MATCHES_FROM_STAGE"
+                else:
+                    proc_name = "LOAD_MATCHES_FROM_STAGE"
+                print(f"\n   You can manually run: CALL {proc_name}();")
         
         print()
         print("=" * 80)

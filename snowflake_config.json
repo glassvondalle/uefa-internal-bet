@@ -7,6 +7,9 @@
     "schema": "UCL_APUESTA_SCHEMA",
     "role": "",
     "stage_name": "EUROPEAN_CUPS_STAGE",
-    "sql_file": "create_european_club_cups_objects.sql"
+    "sql_file": "create_european_club_cups_objects.sql",
+    "load_procedure_file": "load_data_from_stage.sql",
+    "load_to_tables": true,
+    "skip_existing_files": true
 }
 
