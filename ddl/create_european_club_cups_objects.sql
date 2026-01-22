@@ -123,7 +123,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE UCL_APUESTA_DB.UCL_APUESTA_SCHEMA.
 
 -- Grant privileges on stage (using fully qualified name)
 -- READ for downloading, WRITE for uploading
-GRANT USAGE, READ, WRITE ON STAGE UCL_APUESTA_DB.UCL_APUESTA_SCHEMA.EUROPEAN_CUPS_STAGE TO ROLE UCL_APUESTA_ROLE;
+GRANT READ, WRITE ON STAGE UCL_APUESTA_DB.UCL_APUESTA_SCHEMA.EUROPEAN_CUPS_STAGE TO ROLE UCL_APUESTA_ROLE;
 
 -- ----------------------------------------------------------------------------
 -- 6. Optional: Create Service User (Best Practice)
