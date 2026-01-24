@@ -171,7 +171,7 @@ def main():
         # Display table with styling
         st.dataframe(
             display_df,
-            use_container_width=True,
+            width='stretch',
             hide_index=True
         )
         
@@ -216,7 +216,7 @@ def main():
             # Display table
             st.dataframe(
                 display_details,
-                use_container_width=True,
+                width='stretch',
                 hide_index=True
             )
             
@@ -233,7 +233,7 @@ def main():
             
             st.dataframe(
                 competition_summary,
-                use_container_width=True,
+                width='stretch',
                 hide_index=True
             )
         else:
