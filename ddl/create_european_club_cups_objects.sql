@@ -69,7 +69,7 @@ GRANT USAGE ON SCHEMA UCL_APUESTA_DB.UCL_APUESTA_SCHEMA TO ROLE UCL_APUESTA_ROLE
 -- phase, and teams should ensure uniqueness)
 -- ----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS UCL_APUESTA_DB.UCL_APUESTA_SCHEMA.EUROPEAN_CLUB_CUPS_MATCHES (
+CREATE OR REPLACE TABLE UCL_APUESTA_DB.UCL_APUESTA_SCHEMA.EUROPEAN_CLUB_CUPS_MATCHES (
     MATCH_ID STRING,
     COMPETITION STRING,
     SEASON STRING,
@@ -92,13 +92,18 @@ COMMENT = 'Main table storing European club cup match results. MATCH_ID is the n
 -- Tracks data loading operations including file name, row count, and status
 -- ----------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS UCL_APUESTA_DB.UCL_APUESTA_SCHEMA.EUROPEAN_CLUB_CUPS_LOAD_LOG (
+CREATE OR REPLACE TABLE UCL_APUESTA_DB.UCL_APUESTA_SCHEMA.EUROPEAN_CLUB_CUPS_LOAD_LOG (
     LOAD_DATETIME TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP,
     FILE_NAME STRING,
     ROWS_INSERTED INTEGER,
     STATUS STRING
 )
 COMMENT = 'Log table tracking data load operations for European club cups data.';
+
+CREATE OR REPLACE TABLE PARTICIPANTES
+    (JUGADOR VARCHAR,
+    TEAM VARCHAR)
+COMMENT = 'Table with the tuple players and picked teams';
 
 -- ----------------------------------------------------------------------------
 -- 4. Internal Stage: EUROPEAN_CUPS_STAGE

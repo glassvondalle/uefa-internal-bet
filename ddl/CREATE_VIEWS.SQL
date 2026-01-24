@@ -1,0 +1,95 @@
+USE DATABASE UCL_APUESTA_DB;
+USE SCHEMA UCL_APUESTA_SCHEMA;
+
+
+CREATE OR REPLACE VIEW EUROPEAN_CLUB_CUPS_MATCHES_CONSOLIDATED
+AS
+        SELECT COMPETITION, HOME_TEAM, AWAY_TEAM, HOME_GOALS, AWAY_GOALS, 
+        CASE WHEN HOME_GOALS > AWAY_GOALS THEN 3
+        WHEN HOME_GOALS = AWAY_GOALS THEN 1
+        ELSE 0 END AS HOME_POINTS,
+        CASE WHEN HOME_GOALS < AWAY_GOALS THEN 3
+        WHEN HOME_GOALS = AWAY_GOALS THEN 1
+        ELSE 0 END AS AWAY_POINTS,
+        CASE WHEN HOME_GOALS > AWAY_GOALS THEN 1
+        ELSE 0 END as HOME_WIN_GAMES,
+        CASE WHEN HOME_GOALS = AWAY_GOALS then 1
+        else 0 end as DRAW_GAMES,
+        case when AWAY_GOALS > HOME_GOALS then 1
+        else 0 end as AWAY_WIN_GAMES
+        FROM EUROPEAN_CLUB_CUPS_MATCHES;
+
+CREATE OR REPLACE VIEW HOME
+AS
+        SELECT 
+        HOME_TEAM, COMPETITION, 
+        COUNT(1) PJ, 
+        sum(HOME_WIN_GAMES) WINS,
+        sum(DRAW_GAMES) DRAWS,
+        sum(AWAY_WIN_GAMES) LOSES,
+        sum(HOME_GOALS) GF,
+        sum(AWAY_GOALS) GA,
+        SUM(HOME_POINTS) HOME_PTS
+        FROM EUROPEAN_CLUB_CUPS_MATCHES_CONSOLIDATED
+        GROUP BY HOME_TEAM, COMPETITION;
+
+CREATE OR REPLACE VIEW AWAY
+AS
+        SELECT 
+        AWAY_TEAM, COMPETITION, 
+        COUNT(1) PJ, 
+        sum(AWAY_WIN_GAMES) WINS,
+        sum(DRAW_GAMES) DRAWS,
+        sum(HOME_WIN_GAMES) LOSES,
+        sum(AWAY_GOALS) GF,
+        sum(HOME_GOALS) GA,
+        SUM(AWAY_POINTS) AWAY_PTS
+        FROM EUROPEAN_CLUB_CUPS_MATCHES_CONSOLIDATED 
+        GROUP BY AWAY_TEAM, COMPETITION;
+
+CREATE OR REPLACE VIEW TOTAL
+AS
+        SELECT HOME_TEAM, COMPETITION, PJ, WINS, DRAWS, LOSES, GF, GA, GF-GA GD, HOME_PTS
+        FROM HOME
+        UNION ALL
+        SELECT AWAY_TEAM, COMPETITION, PJ, WINS, DRAWS, LOSES, GF, GA, GF-GA GD, AWAY_PTS
+        FROM AWAY;
+
+CREATE OR REPLACE VIEW REAL_TABLE
+as
+    SELECT 
+    COMPETITION, HOME_TEAM AS TEAM, 
+    sum(PJ) MP, 
+    sum(WINS) W, 
+    sum(DRAWS) D, 
+    sum(LOSES) L,
+    sum(GF) GF,
+    sum(GA) GA,
+    sum(GD) GD,
+    sum(HOME_PTS) PTS
+    FROM TOTAL
+    GROUP BY COMPETITION, HOME_TEAM
+    ORDER BY COMPETITION, PTS desc, GD desc, GF desc;
+
+CREATE OR REPLACE VIEW APUESTA_TABLE
+as
+    SELECT 
+    competition,
+    team,
+    MP,
+    W,
+    D,
+    L,
+    (w*2)+D PTS,
+    rank() over (PARTITION BY competition order by PTS DESC) as pos
+    from
+    REAL_TABLE;
+
+CREATE OR REPLACE VIEW RECLASIFICACION
+as
+    select jugador, sum(pts) pts, sum(pts)/sum(mp) avg from
+    participantes a
+    left join
+    apuesta_table
+    on a.team = apuesta_table.team
+    group by jugador;
