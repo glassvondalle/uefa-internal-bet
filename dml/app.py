@@ -65,8 +65,7 @@ def query_reclasificacion(conn: snowflake.connector.SnowflakeConnection) -> pd.D
     SELECT 
         JUGADOR,
         PTS,
-        AVG,
-        ROUND(AVG, 2) AS AVG_ROUNDED
+        ROUND(AVG, 3) AS AVG
     FROM UCL_APUESTA_DB.UCL_APUESTA_SCHEMA.RECLASIFICACION
     ORDER BY PTS DESC, AVG DESC
     """
