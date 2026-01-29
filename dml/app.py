@@ -115,6 +115,18 @@ def query_jugador_details(conn: snowflake.connector.SnowflakeConnection, jugador
         
         if data:
             df = pd.DataFrame(data, columns=columns)
+            
+            # Add STATUS column based on POS
+            def get_status(pos):
+                if pos < 9:
+                    return "CLASIFICADO"
+                elif pos >= 9 and pos < 24:
+                    return "PLAYOFFS"
+                else:
+                    return "ELIMINADO"
+            
+            df['STATUS'] = df['POS'].apply(get_status)
+            
             return df
         else:
             return pd.DataFrame(columns=columns)
@@ -208,13 +220,33 @@ def main():
             
             # Format the dataframe for display
             display_details = df_details.copy()
-            display_details.columns = ['Competition', 'Team', 'Matches Played', 'Wins', 'Draws', 'Losses', 'Points', 'Position']
+            display_details.columns = ['Competition', 'Team', 'Matches Played', 'Wins', 'Draws', 'Losses', 'Points', 'Position', 'Status']
             
-            # Display table
+            # Reorder columns to put Status after Position
+            column_order = ['Competition', 'Team', 'Matches Played', 'Wins', 'Draws', 'Losses', 'Points', 'Position', 'Status']
+            display_details = display_details[column_order]
+            
+            # Apply conditional row styling based on Position
+            def style_row(row):
+                pos = row['Position']
+                if pos < 9:
+                    bg_color = '#0E1E5B'  # CLASIFICADO
+                elif pos >= 9 and pos < 24:
+                    bg_color = '#3562A6'  # PLAYOFFS
+                else:
+                    bg_color = '#0B0B0B'  # ELIMINADO
+                
+                # Return style for entire row (white text on colored background)
+                return [f'background-color: {bg_color}; color: white'] * len(row)
+            
+            # Apply styling using pandas Styler
+            styled_df = display_details.style.apply(style_row, axis=1)
+            
+            # Display styled table - Streamlit supports pandas Styler objects
             st.dataframe(
-                display_details,
-                width='stretch',
-                hide_index=True
+                styled_df,
+                hide_index=True,
+                use_container_width=True
             )
             
             # Group by competition for summary
