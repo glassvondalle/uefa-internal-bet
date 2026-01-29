@@ -191,13 +191,11 @@ def main():
         player_summary = df_reclasificacion[df_reclasificacion['JUGADOR'] == selected_jugador].iloc[0]
         
         # Display summary metrics
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
             st.metric("Total Points", int(player_summary['PTS']))
         with col2:
             st.metric("Average Points", f"{player_summary['AVG']:.2f}")
-        with col3:
-            st.metric("Average (Rounded)", f"{player_summary['AVG_ROUNDED']:.2f}")
         
         st.markdown("---")
         
