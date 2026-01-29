@@ -165,7 +165,7 @@ def main():
         
         # Format the dataframe for display
         display_df = df_reclasificacion.copy()
-        display_df.columns = ['Jugador', 'Points', 'Average', 'Avg (Rounded)']
+        display_df.columns = ['Jugador', 'Points', 'AVG']
         
         # Display table with styling
         st.dataframe(
