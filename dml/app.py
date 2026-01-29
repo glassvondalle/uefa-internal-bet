@@ -195,7 +195,7 @@ def main():
         with col1:
             st.metric("Total Points", int(player_summary['PTS']))
         with col2:
-            st.metric("Average Points", f"{player_summary['AVG']:.2f}")
+            st.metric("Average Points", f"{player_summary['AVG']:.3f}")
         
         st.markdown("---")
         
