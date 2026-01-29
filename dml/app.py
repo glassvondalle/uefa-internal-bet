@@ -222,55 +222,64 @@ def main():
             display_details = df_details.copy()
             display_details.columns = ['Competition', 'Team', 'Matches Played', 'Wins', 'Draws', 'Losses', 'Points', 'Position', 'Status']
             
+            # Order by competition: UCL, UEL, UECL
+            competition_order = {'UCL': 1, 'UEL': 2, 'UECL': 3}
+            display_details['_sort_order'] = display_details['Competition'].map(competition_order).fillna(99)
+            display_details = display_details.sort_values(['_sort_order', 'Position']).drop('_sort_order', axis=1)
+            
             # Reorder columns to put Status after Position
             column_order = ['Competition', 'Team', 'Matches Played', 'Wins', 'Draws', 'Losses', 'Points', 'Position', 'Status']
             display_details = display_details[column_order]
             
             # Define color schemes by competition
-            def get_row_colors(competition, pos):
+            def get_row_style(competition, pos):
                 """
-                Get background color based on competition and position.
-                Returns tuple: (bg_color, text_color)
+                Get styling based on competition and position.
+                Returns tuple: (bg_color, text_color, is_strikethrough)
                 """
+                # ELIMINADO is the same for all competitions
+                if pos >= 24:
+                    return '#A00000', 'white', True  # ELIMINADO - red background, white text, strikethrough
+                
                 # UCL color scheme
                 if competition == 'UCL':
                     if pos < 9:
-                        return '#0E1E5B', 'white'  # CLASIFICADO
+                        return '#0E1E5B', 'white', False  # CLASIFICADO
                     elif pos >= 9 and pos < 24:
-                        return '#3562A6', 'white'  # PLAYOFFS
-                    else:
-                        return '#0B0B0B', 'white'  # ELIMINADO
+                        return '#3562A6', 'white', False  # PLAYOFFS
                 
-                # UEL color scheme (to be defined)
+                # UEL color scheme
                 elif competition == 'UEL':
                     if pos < 9:
-                        return '#FFFFFF', 'black'  # Placeholder - CLASIFICADO
+                        return '#D85C00', 'black', False  # CLASIFICADO
                     elif pos >= 9 and pos < 24:
-                        return '#FFFFFF', 'black'  # Placeholder - PLAYOFFS
-                    else:
-                        return '#FFFFFF', 'black'  # Placeholder - ELIMINADO
+                        return '#FAC40B', 'black', False  # PLAYOFFS
                 
-                # UECL color scheme (to be defined)
+                # UECL color scheme (CLASIFICADO and PLAYOFFS to be defined)
                 elif competition == 'UECL':
                     if pos < 9:
-                        return '#FFFFFF', 'black'  # Placeholder - CLASIFICADO
+                        return '#FFFFFF', 'black', False  # Placeholder - CLASIFICADO
                     elif pos >= 9 and pos < 24:
-                        return '#FFFFFF', 'black'  # Placeholder - PLAYOFFS
-                    else:
-                        return '#FFFFFF', 'black'  # Placeholder - ELIMINADO
+                        return '#FFFFFF', 'black', False  # Placeholder - PLAYOFFS
                 
                 # Default (no styling)
-                else:
-                    return 'transparent', 'black'
+                return 'transparent', 'black', False
             
             # Apply conditional row styling based on Competition and Position
             def style_row(row):
                 competition = row['Competition']
                 pos = row['Position']
-                bg_color, text_color = get_row_colors(competition, pos)
+                bg_color, text_color, is_strikethrough = get_row_style(competition, pos)
+                
+                # Build CSS style string
+                style_parts = [f'background-color: {bg_color}', f'color: {text_color}']
+                if is_strikethrough:
+                    style_parts.append('text-decoration: line-through')
+                
+                style_str = '; '.join(style_parts)
                 
                 # Return style for entire row
-                return [f'background-color: {bg_color}; color: {text_color}'] * len(row)
+                return [style_str] * len(row)
             
             # Apply styling using pandas Styler
             styled_df = display_details.style.apply(style_row, axis=1)
