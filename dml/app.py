@@ -139,12 +139,12 @@ def query_jugador_details(conn: snowflake.connector.SnowflakeConnection, jugador
 def main():
     """Main Streamlit app."""
     st.set_page_config(
-        page_title="European Club Cups - Reclasificación",
+        page_title="UEFA BET - Reclasificación",
         page_icon="⚽",
         layout="wide"
     )
     
-    st.title("⚽ European Club Cups - Reclasificación")
+    st.title("⚽ UEFA BET - Reclasificación")
     st.markdown("---")
     
     # Load configuration and connect to Snowflake
@@ -226,18 +226,51 @@ def main():
             column_order = ['Competition', 'Team', 'Matches Played', 'Wins', 'Draws', 'Losses', 'Points', 'Position', 'Status']
             display_details = display_details[column_order]
             
-            # Apply conditional row styling based on Position
-            def style_row(row):
-                pos = row['Position']
-                if pos < 9:
-                    bg_color = '#0E1E5B'  # CLASIFICADO
-                elif pos >= 9 and pos < 24:
-                    bg_color = '#3562A6'  # PLAYOFFS
-                else:
-                    bg_color = '#0B0B0B'  # ELIMINADO
+            # Define color schemes by competition
+            def get_row_colors(competition, pos):
+                """
+                Get background color based on competition and position.
+                Returns tuple: (bg_color, text_color)
+                """
+                # UCL color scheme
+                if competition == 'UCL':
+                    if pos < 9:
+                        return '#0E1E5B', 'white'  # CLASIFICADO
+                    elif pos >= 9 and pos < 24:
+                        return '#3562A6', 'white'  # PLAYOFFS
+                    else:
+                        return '#0B0B0B', 'white'  # ELIMINADO
                 
-                # Return style for entire row (white text on colored background)
-                return [f'background-color: {bg_color}; color: white'] * len(row)
+                # UEL color scheme (to be defined)
+                elif competition == 'UEL':
+                    if pos < 9:
+                        return '#FFFFFF', 'black'  # Placeholder - CLASIFICADO
+                    elif pos >= 9 and pos < 24:
+                        return '#FFFFFF', 'black'  # Placeholder - PLAYOFFS
+                    else:
+                        return '#FFFFFF', 'black'  # Placeholder - ELIMINADO
+                
+                # UECL color scheme (to be defined)
+                elif competition == 'UECL':
+                    if pos < 9:
+                        return '#FFFFFF', 'black'  # Placeholder - CLASIFICADO
+                    elif pos >= 9 and pos < 24:
+                        return '#FFFFFF', 'black'  # Placeholder - PLAYOFFS
+                    else:
+                        return '#FFFFFF', 'black'  # Placeholder - ELIMINADO
+                
+                # Default (no styling)
+                else:
+                    return 'transparent', 'black'
+            
+            # Apply conditional row styling based on Competition and Position
+            def style_row(row):
+                competition = row['Competition']
+                pos = row['Position']
+                bg_color, text_color = get_row_colors(competition, pos)
+                
+                # Return style for entire row
+                return [f'background-color: {bg_color}; color: {text_color}'] * len(row)
             
             # Apply styling using pandas Styler
             styled_df = display_details.style.apply(style_row, axis=1)
