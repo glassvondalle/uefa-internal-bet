@@ -244,7 +244,7 @@ def main():
                     pos = 0
                 
                 # ELIMINADO is the same for all competitions
-                if pos >= 24:
+                if pos > 24:
                     return '#FFFFFF', 'black', True  # ELIMINADO - red background, white text, strikethrough
                 
                 # UCL color scheme

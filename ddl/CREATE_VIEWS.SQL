@@ -57,19 +57,36 @@ AS
 
 CREATE OR REPLACE VIEW REAL_TABLE
 as
-    SELECT 
-    COMPETITION, HOME_TEAM AS TEAM, 
-    sum(PJ) MP, 
-    sum(WINS) W, 
-    sum(DRAWS) D, 
-    sum(LOSES) L,
-    sum(GF) GF,
-    sum(GA) GA,
-    sum(GD) GD,
-    sum(HOME_PTS) PTS
-    FROM TOTAL
-    GROUP BY COMPETITION, HOME_TEAM
-    ORDER BY COMPETITION, PTS desc, GD desc, GF desc;
+WITH a AS
+    (
+        SELECT 
+        TOTAL.COMPETITION, 
+        HOME_TEAM AS TEAM, 
+        sum(TOTAL.PJ) MP, 
+        sum(TOTAL.WINS) W, 
+        sum(TOTAL.DRAWS) D, 
+        sum(TOTAL.LOSES) L,
+        sum(TOTAL.GF) GF,
+        sum(TOTAL.GA) GA,
+        sum(TOTAL.GD) GD,
+        sum(TOTAL.HOME_PTS) PTS,
+        sum(AWAY.GF) AWAY_GF,
+        sum(AWAY.WINS) AWAY_W
+        FROM TOTAL
+        LEFT OUTER JOIN
+        AWAY
+        ON TOTAL.HOME_TEAM = AWAY.AWAY_TEAM
+        GROUP BY TOTAL.COMPETITION, HOME_TEAM
+    )
+    select 
+    a.*,
+    rank() over (PARTITION BY a.competition 
+                        ORDER BY PTS DESC, GD DESC,
+                         GA DESC, AWAY_GF DESC, W DESC, AWAY_W DESC
+                    ) as pos
+    FROM a
+    ORDER BY COMPETITION, pos
+    ;
 
 CREATE OR REPLACE VIEW APUESTA_TABLE
 as
@@ -81,7 +98,7 @@ as
     D,
     L,
     (w*2)+D PTS,
-    rank() over (PARTITION BY competition order by PTS DESC) as pos
+    pos
     from
     REAL_TABLE;
 
