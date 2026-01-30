@@ -258,7 +258,7 @@ def main():
                 elif competition == 'UEL':
                     if pos < 9:
                         return '#D85C00', 'black', False  # CLASIFICADO
-                    elif pos >= 9 and pos < 24:
+                    elif pos >= 9 and pos <= 24:
                         return '#FAC40B', 'black', False  # PLAYOFFS
                 
                 # UECL color scheme (CLASIFICADO and PLAYOFFS to be defined)
