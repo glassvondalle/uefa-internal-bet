@@ -4,6 +4,7 @@ Displays RECLASIFICACION view with filter by JUGADOR
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import snowflake.connector
 import json
 import pandas as pd
@@ -302,12 +303,12 @@ def main():
             # Apply styling using pandas Styler
             styled_df = display_details_styled.style.apply(style_row, axis=1)
             
-            # Convert styled dataframe to HTML and render with markdown to support HTML tags
+            # Convert styled dataframe to HTML and render with HTML component
             html_table = styled_df.to_html(escape=False, index=False)
             
-            # Use Streamlit's HTML component to properly render the styled table
-            import streamlit.components.v1 as components
-            components.html(html_table, height=600, scrolling=True)
+            # Use Streamlit's HTML component to properly render the styled table with CSS
+            # This ensures the style tags are properly rendered, not displayed as text
+            components.html(html_table, height=400, scrolling=True)
             
             # Group by competition for summary
             st.subheader("📊 Summary by Competition")
