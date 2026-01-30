@@ -239,7 +239,7 @@ def main():
                 """
                 # ELIMINADO is the same for all competitions
                 if pos >= 24:
-                    return '#808080', 'white', True  # ELIMINADO - red background, white text, strikethrough
+                    return '#FFFFFF', 'black', True  # ELIMINADO - red background, white text, strikethrough
                 
                 # UCL color scheme
                 if competition == 'UCL':
@@ -265,6 +265,16 @@ def main():
                 # Default (no styling)
                 return 'transparent', 'black', False
             
+            # Add strikethrough HTML tags to ELIMINADO rows before styling
+            display_details_styled = display_details.copy()
+            eliminado_mask = display_details_styled['Position'] >= 24
+            
+            # Wrap all cell values in ELIMINADO rows with HTML strikethrough tags
+            for col in display_details_styled.columns:
+                display_details_styled.loc[eliminado_mask, col] = display_details_styled.loc[eliminado_mask, col].apply(
+                    lambda x: f'<s>{x}</s>' if pd.notna(x) else x
+                )
+            
             # Apply conditional row styling based on Competition and Position
             def style_row(row):
                 competition = row['Competition']
@@ -273,23 +283,17 @@ def main():
                 
                 # Build CSS style string
                 style_parts = [f'background-color: {bg_color}', f'color: {text_color}']
-                if is_strikethrough:
-                    style_parts.append('text-decoration: line-through')
-                
                 style_str = '; '.join(style_parts)
                 
                 # Return style for entire row
                 return [style_str] * len(row)
             
             # Apply styling using pandas Styler
-            styled_df = display_details.style.apply(style_row, axis=1)
+            styled_df = display_details_styled.style.apply(style_row, axis=1)
             
-            # Display styled table - Streamlit supports pandas Styler objects
-            st.dataframe(
-                styled_df,
-                hide_index=True,
-                use_container_width=True
-            )
+            # Convert styled dataframe to HTML and render with markdown to support HTML tags
+            html_table = styled_df.to_html(escape=False, index=False)
+            st.markdown(html_table, unsafe_allow_html=True)
             
             # Group by competition for summary
             st.subheader("📊 Summary by Competition")
