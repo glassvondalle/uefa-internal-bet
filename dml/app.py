@@ -4,7 +4,6 @@ Displays RECLASIFICACION view with filter by JUGADOR
 """
 
 import streamlit as st
-import streamlit.components.v1 as components
 import snowflake.connector
 import json
 import pandas as pd
@@ -272,23 +271,14 @@ def main():
                 # Default (no styling)
                 return 'transparent', 'black', False
             
-            # Add strikethrough HTML tags to ELIMINADO rows before styling
-            display_details_styled = display_details.copy()
             # Convert Position to numeric for comparison
-            display_details_styled['Position'] = pd.to_numeric(display_details_styled['Position'], errors='coerce')
-            eliminado_mask = display_details_styled['Position'] >= 24
-            
-            # Wrap all cell values in ELIMINADO rows with HTML strikethrough tags
-            for col in display_details_styled.columns:
-                display_details_styled.loc[eliminado_mask, col] = display_details_styled.loc[eliminado_mask, col].apply(
-                    lambda x: f'<s>{x}</s>' if pd.notna(x) else x
-                )
+            display_details['Position'] = pd.to_numeric(display_details['Position'], errors='coerce')
             
             # Apply conditional row styling based on Competition and Position
             def style_row(row):
                 competition = row['Competition']
                 pos = row['Position']
-                bg_color, text_color, is_strikethrough = get_row_style(competition, pos)
+                bg_color, text_color, _ = get_row_style(competition, pos)
                 
                 # Build CSS style string
                 style_parts = [f'background-color: {bg_color}', f'color: {text_color}']
@@ -297,18 +287,15 @@ def main():
                 # Return style for entire row
                 return [style_str] * len(row)
             
-            # Reset index to ensure no index column is displayed
-            display_details_styled = display_details_styled.reset_index(drop=True)
-            
             # Apply styling using pandas Styler
-            styled_df = display_details_styled.style.apply(style_row, axis=1)
+            styled_df = display_details.style.apply(style_row, axis=1)
             
-            # Convert styled dataframe to HTML and render with HTML component
-            html_table = styled_df.to_html(escape=False, index=False)
-            
-            # Use Streamlit's HTML component to properly render the styled table with CSS
-            # This ensures the style tags are properly rendered, not displayed as text
-            components.html(html_table, height=400, scrolling=True)
+            # Display styled table - Streamlit supports pandas Styler objects
+            st.dataframe(
+                styled_df,
+                hide_index=True,
+                use_container_width=True
+            )
             
             # Group by competition for summary
             st.subheader("📊 Summary by Competition")
