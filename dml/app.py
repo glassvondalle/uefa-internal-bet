@@ -296,12 +296,28 @@ def main():
                 # Return style for entire row
                 return [style_str] * len(row)
             
+            # Reset index to ensure no index column is displayed
+            display_details_styled = display_details_styled.reset_index(drop=True)
+            
             # Apply styling using pandas Styler
             styled_df = display_details_styled.style.apply(style_row, axis=1)
             
             # Convert styled dataframe to HTML and render with markdown to support HTML tags
             html_table = styled_df.to_html(escape=False, index=False)
-            st.markdown(html_table, unsafe_allow_html=True)
+            
+            # Add CSS to ensure no index column is visible and style the table
+            html_with_style = f"""
+            <style>
+                table.dataframe thead th:first-child {{
+                    display: none;
+                }}
+                table.dataframe tbody th:first-child {{
+                    display: none;
+                }}
+            </style>
+            {html_table}
+            """
+            st.markdown(html_with_style, unsafe_allow_html=True)
             
             # Group by competition for summary
             st.subheader("📊 Summary by Competition")
