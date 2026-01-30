@@ -120,7 +120,7 @@ def query_jugador_details(conn: snowflake.connector.SnowflakeConnection, jugador
             def get_status(pos):
                 if pos < 9:
                     return "CLASIFICADO"
-                elif pos >= 9 and pos < 24:
+                elif pos >= 9 and pos <= 24:
                     return "PLAYOFFS"
                 else:
                     return "ELIMINADO"
@@ -245,7 +245,7 @@ def main():
                 
                 # ELIMINADO is the same for all competitions
                 if pos > 24:
-                    return '#FFFFFF', 'black', True  # ELIMINADO - red background, white text, strikethrough
+                    return '#FFFFFF', 'black', True  # ELIMINADO
                 
                 # UCL color scheme
                 if competition == 'UCL':
