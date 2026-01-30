@@ -258,9 +258,9 @@ def main():
                 # UECL color scheme (CLASIFICADO and PLAYOFFS to be defined)
                 elif competition == 'UECL':
                     if pos < 9:
-                        return '#00FF00', 'white', False  # Placeholder - CLASIFICADO
+                        return '#007c00', 'white', False  # Placeholder - CLASIFICADO
                     elif pos >= 9 and pos < 24:
-                        return '#FFFFFF', 'white', False  # Placeholder - PLAYOFFS
+                        return '#26d26d', 'white', False  # Placeholder - PLAYOFFS
                 
                 # Default (no styling)
                 return 'transparent', 'black', False
