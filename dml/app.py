@@ -251,7 +251,7 @@ def main():
                 if competition == 'UCL':
                     if pos < 9:
                         return '#0E1E5B', 'white', False  # CLASIFICADO
-                    elif pos >= 9 and pos < 24:
+                    elif pos >= 9 and pos <= 24:
                         return '#3562A6', 'white', False  # PLAYOFFS
                 
                 # UEL color scheme
@@ -265,7 +265,7 @@ def main():
                 elif competition == 'UECL':
                     if pos < 9:
                         return '#007c00', 'white', False  # Placeholder - CLASIFICADO
-                    elif pos >= 9 and pos < 24:
+                    elif pos >= 9 and pos <= 24:
                         return '#26d26d', 'white', False  # Placeholder - PLAYOFFS
                 
                 # Default (no styling)
