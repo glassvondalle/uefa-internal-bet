@@ -237,6 +237,12 @@ def main():
                 Get styling based on competition and position.
                 Returns tuple: (bg_color, text_color, is_strikethrough)
                 """
+                # Convert pos to integer if it's not already
+                try:
+                    pos = int(float(pos)) if pd.notna(pos) else 0
+                except (ValueError, TypeError):
+                    pos = 0
+                
                 # ELIMINADO is the same for all competitions
                 if pos >= 24:
                     return '#FFFFFF', 'black', True  # ELIMINADO - red background, white text, strikethrough
@@ -267,6 +273,8 @@ def main():
             
             # Add strikethrough HTML tags to ELIMINADO rows before styling
             display_details_styled = display_details.copy()
+            # Convert Position to numeric for comparison
+            display_details_styled['Position'] = pd.to_numeric(display_details_styled['Position'], errors='coerce')
             eliminado_mask = display_details_styled['Position'] >= 24
             
             # Wrap all cell values in ELIMINADO rows with HTML strikethrough tags
