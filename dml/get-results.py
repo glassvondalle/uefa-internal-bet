@@ -130,9 +130,10 @@ def load_scraper_params(params_path: Optional[str] = None) -> dict:
         sys.exit(1)
 
 
-def is_match_in_league_phase(match_date: str, competition_code: str, params: dict) -> bool:
+def is_match_in_any_phase(match_date: str, competition_code: str, params: dict) -> bool:
     """
-    Check if a match date falls within the league phase date range for the competition.
+    Check if a match date falls within any phase date range for the competition.
+    Dynamically checks all phase date ranges defined in params (LEAGUE_PHASE, PLAYOFF, etc.).
     
     Args:
         match_date: Match date in YYYY-MM-DD format
@@ -140,39 +141,122 @@ def is_match_in_league_phase(match_date: str, competition_code: str, params: dic
         params: Dictionary with scraper parameters
     
     Returns:
-        True if match is within league phase dates, False otherwise
+        True if match is within any phase date range, False otherwise
     """
     if not match_date or match_date == "2024-01-01":
         return False
     
+    if not params:
+        return False
+    
     try:
-        # Get date range for this competition
-        initial_date_key = f"{competition_code}_LEAGUE_PHASE_INITIAL_DATE"
-        end_date_key = f"{competition_code}_LEAGUE_PHASE_END_DATE"
+        # Parse match date
+        match_dt = datetime.strptime(match_date, "%Y-%m-%d")
         
-        initial_date_str = params.get(initial_date_key)
-        end_date_str = params.get(end_date_key)
+        # Find all phase date ranges in params for this competition
+        # Look for keys like: {COMPETITION}_*_INITIAL_DATE and {COMPETITION}_*_END_DATE
+        phase_ranges = {}
         
-        if not initial_date_str or not end_date_str:
-            print(f"   ⚠️  Warning: Missing date range for {competition_code}. Including all matches.")
+        for key in params.keys():
+            if key.startswith(f"{competition_code}_") and key.endswith("_INITIAL_DATE"):
+                # Extract phase name (e.g., "LEAGUE_PHASE" or "PLAYOFF")
+                phase_name = key.replace(f"{competition_code}_", "").replace("_INITIAL_DATE", "")
+                end_date_key = f"{competition_code}_{phase_name}_END_DATE"
+                
+                if end_date_key in params:
+                    initial_date_str = params.get(key)
+                    end_date_str = params.get(end_date_key)
+                    
+                    if initial_date_str and end_date_str:
+                        try:
+                            initial_dt = datetime.strptime(initial_date_str, "%Y-%m-%d")
+                            end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
+                            phase_ranges[phase_name] = (initial_dt, end_dt)
+                        except ValueError:
+                            continue
+        
+        # If no phase ranges found, include all matches (backward compatibility)
+        if not phase_ranges:
+            print(f"   ⚠️  Warning: No phase date ranges found for {competition_code}. Including all matches.")
             return True
         
-        # Parse dates
-        match_dt = datetime.strptime(match_date, "%Y-%m-%d")
-        initial_dt = datetime.strptime(initial_date_str, "%Y-%m-%d")
-        end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
+        # Check if match date falls within any phase date range
+        for phase_name, (initial_dt, end_dt) in phase_ranges.items():
+            if initial_dt <= match_dt <= end_dt:
+                return True
         
-        # Check if match date is within range (inclusive)
-        is_in_range = initial_dt <= match_dt <= end_dt
-        return is_in_range
+        # Match date is not within any phase range
+        return False
         
     except ValueError as e:
         # Date parsing error - might be wrong format
         print(f"   ⚠️  Date parsing error for {match_date} in {competition_code}: {e}")
         return False  # Exclude match if date can't be parsed
     except Exception as e:
-        print(f"   ⚠️  Error checking date range for {competition_code}: {e}")
+        print(f"   ⚠️  Error checking date ranges for {competition_code}: {e}")
         return True  # Include match if there's an error
+
+
+def get_phase_from_params(match_date: str, competition_code: str, params: Optional[dict]) -> str:
+    """
+    Determine PHASE based on match date and date parameters from scraper_params.json.
+    
+    Args:
+        match_date: Match date in YYYY-MM-DD format
+        competition_code: Competition code (UCL, UEL, UECL)
+        params: Dictionary with scraper parameters (from scraper_params.json)
+    
+    Returns:
+        Phase string: "LEAGUE_PHASE", "PLAYOFFS", or "KNOCKOUT_PHASE" based on date ranges
+    """
+    if not match_date or match_date == "2024-01-01":
+        return "UNKNOWN"
+    
+    if not params:
+        return "UNKNOWN"
+    
+    try:
+        # Parse match date
+        match_dt = datetime.strptime(match_date, "%Y-%m-%d")
+        
+        # Check LEAGUE_PHASE date range
+        league_initial_key = f"{competition_code}_LEAGUE_PHASE_INITIAL_DATE"
+        league_end_key = f"{competition_code}_LEAGUE_PHASE_END_DATE"
+        
+        league_initial_str = params.get(league_initial_key)
+        league_end_str = params.get(league_end_key)
+        
+        if league_initial_str and league_end_str:
+            league_initial_dt = datetime.strptime(league_initial_str, "%Y-%m-%d")
+            league_end_dt = datetime.strptime(league_end_str, "%Y-%m-%d")
+            
+            if league_initial_dt <= match_dt <= league_end_dt:
+                return "LEAGUE_PHASE"
+        
+        # Check PLAYOFF date range
+        playoff_initial_key = f"{competition_code}_PLAYOFF_INITIAL_DATE"
+        playoff_end_key = f"{competition_code}_PLAYOFF_END_DATE"
+        
+        playoff_initial_str = params.get(playoff_initial_key)
+        playoff_end_str = params.get(playoff_end_key)
+        
+        if playoff_initial_str and playoff_end_str:
+            playoff_initial_dt = datetime.strptime(playoff_initial_str, "%Y-%m-%d")
+            playoff_end_dt = datetime.strptime(playoff_end_str, "%Y-%m-%d")
+            
+            if playoff_initial_dt <= match_dt <= playoff_end_dt:
+                return "PLAYOFFS"
+        
+        # If not in LEAGUE_PHASE or PLAYOFFS, return KNOCKOUT_PHASE
+        return "KNOCKOUT_PHASE"
+        
+    except ValueError as e:
+        # Date parsing error
+        print(f"   ⚠️  Date parsing error for {match_date} in {competition_code}: {e}")
+        return "UNKNOWN"
+    except Exception as e:
+        print(f"   ⚠️  Error determining phase for {competition_code}: {e}")
+        return "UNKNOWN"
 
 
 def generate_match_id(competition: str, season: str, phase: str, home_team: str, 
@@ -185,50 +269,6 @@ def generate_match_id(competition: str, season: str, phase: str, home_team: str,
     phase_clean = re.sub(r'[^A-Z0-9_]', '_', phase.upper())[:20]
     season_clean = season.replace("/", "_")
     return f"{competition}_{season_clean}_{phase_clean}_{match_hash}"
-
-
-def normalize_phase(phase_text: str) -> str:
-    """
-    Normalize phase information from scraped text.
-    """
-    if not phase_text:
-        return "UNKNOWN"
-    
-    phase_lower = phase_text.lower().strip()
-    
-    # Map common phase names
-    phase_mapping = {
-        "league phase": "LEAGUE_PHASE",
-        "league": "LEAGUE_PHASE",
-        "group stage": "LEAGUE_PHASE",  # Legacy support
-        "group": "LEAGUE_PHASE",  # Legacy support
-        "knockout phase": "KNOCKOUT_PHASE",
-        "knockout": "KNOCKOUT_PHASE",
-        "ko phase": "KNOCKOUT_PHASE",
-        "round of 16": "ROUND_OF_16",
-        "ro16": "ROUND_OF_16",
-        "1/8 final": "ROUND_OF_16",
-        "round of 8": "QUARTER_FINAL",
-        "ro8": "QUARTER_FINAL",
-        "1/4 final": "QUARTER_FINAL",
-        "quarter": "QUARTER_FINAL",
-        "quarter-final": "QUARTER_FINAL",
-        "semi": "SEMI_FINAL",
-        "semi-final": "SEMI_FINAL",
-        "semi final": "SEMI_FINAL",
-        "final": "FINAL",
-        "play-off": "PLAY_OFF",
-        "playoff": "PLAY_OFF",
-        "qualifying": "QUALIFYING",
-        "preliminary": "PRELIMINARY"
-    }
-    
-    for key, value in phase_mapping.items():
-        if key in phase_lower:
-            return value
-    
-    # Clean and return uppercase version
-    return re.sub(r'[^A-Z0-9_]', '_', phase_text.upper())[:30]
 
 
 def infer_phase_from_date(competition_code: str, match_date: str, season: str) -> str:
@@ -685,7 +725,7 @@ def scrape_flashscore_competition(competition_code: str, limit: Optional[int] = 
         # If we didn't find matches with the above method, try parsing the HTML more broadly
         if not matches:
             print("   Trying alternative extraction method...")
-            alt_matches = extract_matches_from_html_structure(soup, competition_code)
+            alt_matches = extract_matches_from_html_structure(soup, competition_code, params)
             matches.extend(alt_matches)
         
         print(f"✅ Found {len(matches)} club matches from {comp_config['name']}")
@@ -715,7 +755,6 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
     """
     matches = []
     current_date = None
-    current_phase = "UNKNOWN"
     
     print(f"   Processing {len(elements)} elements...")
     successful = 0
@@ -753,13 +792,24 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
             home_team = None
             away_team = None
             
+            # Helper function to clean team name
+            def clean_team_name(team_name: str) -> str:
+                """Remove 'Advancing to next round' and other unwanted text from team names."""
+                if not team_name:
+                    return team_name
+                # Remove 'Advancing to next round' (case insensitive)
+                cleaned = re.sub(r'Advancing to next round', '', team_name, flags=re.IGNORECASE)
+                # Remove any extra whitespace
+                cleaned = cleaned.strip()
+                return cleaned
+            
             # Method 1: Extract from participant elements
             if len(participants) >= 2:
-                home_team = participants[0].get_text(strip=True)
-                away_team = participants[1].get_text(strip=True)
+                home_team = clean_team_name(participants[0].get_text(strip=True))
+                away_team = clean_team_name(participants[1].get_text(strip=True))
                 # Ensure they're different (sometimes DOM can have duplicates)
                 if home_team == away_team and len(participants) >= 3:
-                    away_team = participants[2].get_text(strip=True)
+                    away_team = clean_team_name(participants[2].get_text(strip=True))
             
             # Method 2: Parse from pipe-separated text format "Team1 | Team2 | Score1 | Score2"
             if not home_team or not away_team:
@@ -777,16 +827,16 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                 if len(team_candidates) >= 2:
                     # Only set if not already set, and ensure they're different
                     if not home_team:
-                        home_team = team_candidates[0]
+                        home_team = clean_team_name(team_candidates[0])
                     if not away_team:
                         # Make sure away_team is different from home_team
                         if team_candidates[1] != home_team:
-                            away_team = team_candidates[1]
+                            away_team = clean_team_name(team_candidates[1])
                         elif len(team_candidates) > 2 and team_candidates[2] != home_team:
-                            away_team = team_candidates[2]
+                            away_team = clean_team_name(team_candidates[2])
                         else:
                             # If all candidates are the same, try the first candidate again
-                            away_team = team_candidates[1] if len(team_candidates) > 1 else team_candidates[0]
+                            away_team = clean_team_name(team_candidates[1] if len(team_candidates) > 1 else team_candidates[0])
             
             # Method 3: Look for any element with team-like text
             if not home_team or not away_team:
@@ -806,8 +856,8 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                             break
                 
                 if len(text_elements) >= 2:
-                    home_team_text = text_elements[0].get_text(strip=True)
-                    away_team_text = text_elements[1].get_text(strip=True)
+                    home_team_text = clean_team_name(text_elements[0].get_text(strip=True))
+                    away_team_text = clean_team_name(text_elements[1].get_text(strip=True))
                     # Only set if not already set and they're different
                     if not home_team:
                         home_team = home_team_text
@@ -816,7 +866,7 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                     elif not away_team:
                         # If they're the same, try next element
                         if len(text_elements) >= 3:
-                            away_team = text_elements[2].get_text(strip=True)
+                            away_team = clean_team_name(text_elements[2].get_text(strip=True))
             
             if not home_team or not away_team:
                 no_teams += 1
@@ -824,7 +874,11 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                     print(f"   ⚠️  No teams found. Text: {full_text[:200]}")
                 continue
             
-            # Clean team names
+            # Clean team names - remove "Advancing to next round" and other unwanted text
+            home_team = clean_team_name(home_team)
+            away_team = clean_team_name(away_team)
+            
+            # Additional cleaning: remove leading numbers and normalize whitespace
             home_team = re.sub(r'^\d+\.?\s*', '', home_team).strip()
             home_team = re.sub(r'\s+', ' ', home_team)
             away_team = re.sub(r'^\d+\.?\s*', '', away_team).strip()
@@ -837,8 +891,10 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                 team_candidates = []
                 for part in parts:
                     if not part.isdigit() and not re.match(r'^\d{1,2}\.\d{1,2}', part):
-                        if len(part) > 2 and part not in team_candidates:
-                            team_candidates.append(part)
+                        # Clean the part before adding
+                        cleaned_part = clean_team_name(part)
+                        if len(cleaned_part) > 2 and cleaned_part not in team_candidates:
+                            team_candidates.append(cleaned_part)
                             if len(team_candidates) >= 2:
                                 break
                 
@@ -1007,20 +1063,6 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                     # Last resort: use current date (but this shouldn't happen often)
                     match_date = datetime.now().strftime("%Y-%m-%d")
             
-            # Extract phase - look for round/stage information
-            phase = current_phase
-            phase_elements = match_element.find_all(['span', 'div'], 
-                                                    class_=re.compile(r'event__stage|event__round|round|stage|phase', re.I))
-            if not phase_elements and parent:
-                phase_elements = parent.find_all(['span', 'div'], 
-                                                  class_=re.compile(r'event__stage|event__round|round|stage|phase', re.I))
-            
-            if phase_elements:
-                phase_text = phase_elements[0].get_text(strip=True)
-                if phase_text:
-                    phase = normalize_phase(phase_text)
-                    current_phase = phase
-            
             # Determine season from params file (if provided), otherwise infer from date
             if params and params.get("SEASON"):
                 season = params["SEASON"]
@@ -1037,12 +1079,8 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
             else:
                 season = f"{datetime.now().year - 1}/{datetime.now().year}"
             
-            # If phase is still UNKNOWN, try to infer it from the match date
-            if phase == "UNKNOWN" and match_date and match_date != "2024-01-01":
-                inferred_phase = infer_phase_from_date(competition_code, match_date, season)
-                if inferred_phase != "UNKNOWN":
-                    phase = inferred_phase
-                    current_phase = phase  # Update current_phase so subsequent matches can use it
+            # Determine phase from date parameters only
+            phase = get_phase_from_params(match_date, competition_code, params)
             
             # Debug: Show first few matches being processed
             if successful + failed < 3:
@@ -1057,15 +1095,15 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                     failed += 1
                     continue
                 
-                # Filter by date range if params provided (only include league phase matches)
+                # Filter by date range if params provided (include matches within any phase date range)
                 if params:
-                    is_in_range = is_match_in_league_phase(match_date, competition_code, params)
+                    is_in_range = is_match_in_any_phase(match_date, competition_code, params)
                     if not is_in_range:
                         # Debug: show why match was filtered
                         if successful + failed < 5:  # Show first few filtered matches
-                            print(f"   ⚠️  Filtered out (date outside range): {home_team} vs {away_team} on {match_date}")
+                            print(f"   ⚠️  Filtered out (date outside any phase range): {home_team} vs {away_team} on {match_date}")
                         failed += 1
-                        continue  # Skip this match if it's outside the league phase date range
+                        continue  # Skip this match if it's outside all phase date ranges
                 
                 match_id = generate_match_id(
                     competition_code, season, phase, home_team, away_team, match_date
@@ -1108,7 +1146,8 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
 
 def extract_match_from_flashscore_element(element, competition_code: str, 
                                           default_date: Optional[str], 
-                                          default_phase: str) -> Optional[Dict]:
+                                          default_phase: str,
+                                          params: Optional[dict] = None) -> Optional[Dict]:
     """
     Extract match data from a FlashScore HTML element.
     """
@@ -1123,6 +1162,17 @@ def extract_match_from_flashscore_element(element, competition_code: str,
         home_goals = int(score_match.group(1))
         away_goals = int(score_match.group(2))
         
+        # Helper function to clean team name
+        def clean_team_name(team_name: str) -> str:
+            """Remove 'Advancing to next round' and other unwanted text from team names."""
+            if not team_name:
+                return team_name
+            # Remove 'Advancing to next round' (case insensitive)
+            cleaned = re.sub(r'Advancing to next round', '', team_name, flags=re.IGNORECASE)
+            # Remove any extra whitespace
+            cleaned = cleaned.strip()
+            return cleaned
+        
         # Extract team names - they're usually before and after the score
         # Or in separate spans/divs
         team_elements = element.find_all(['span', 'div', 'a'], class_=re.compile(r'team|participant', re.I))
@@ -1131,14 +1181,14 @@ def extract_match_from_flashscore_element(element, competition_code: str,
         away_team = None
         
         if len(team_elements) >= 2:
-            home_team = team_elements[0].get_text(strip=True)
-            away_team = team_elements[1].get_text(strip=True)
+            home_team = clean_team_name(team_elements[0].get_text(strip=True))
+            away_team = clean_team_name(team_elements[1].get_text(strip=True))
         else:
             # Try to extract from text
             parts = re.split(r'\d+\s*:\s*\d+', text)
             if len(parts) >= 2:
-                home_team = parts[0].strip()
-                away_team = parts[1].strip()
+                home_team = clean_team_name(parts[0].strip())
+                away_team = clean_team_name(parts[1].strip())
         
         if not home_team or not away_team:
             return None
@@ -1151,12 +1201,6 @@ def extract_match_from_flashscore_element(element, competition_code: str,
         else:
             match_date = default_date or datetime.now().strftime("%Y-%m-%d")
         
-        # Extract phase if available
-        phase = default_phase
-        phase_element = element.find_parent().find(['span', 'div'], class_=re.compile(r'round|stage|phase', re.I))
-        if phase_element:
-            phase = normalize_phase(phase_element.get_text(strip=True))
-        
         # Determine season from date
         if match_date:
             year = int(match_date.split('-')[0])
@@ -1168,11 +1212,8 @@ def extract_match_from_flashscore_element(element, competition_code: str,
         else:
             season = "UNKNOWN"
         
-        # If phase is still UNKNOWN, try to infer it from the match date
-        if phase == "UNKNOWN" and match_date and match_date != "2024-01-01":
-            inferred_phase = infer_phase_from_date(competition_code, match_date, season)
-            if inferred_phase != "UNKNOWN":
-                phase = inferred_phase
+        # Determine phase from date parameters only
+        phase = get_phase_from_params(match_date or default_date, competition_code, params)
         
         match_id = generate_match_id(
             competition_code, season, phase, home_team, away_team, 
@@ -1195,7 +1236,7 @@ def extract_match_from_flashscore_element(element, competition_code: str,
         return None
 
 
-def extract_matches_from_html_structure(soup: BeautifulSoup, competition_code: str) -> List[Dict]:
+def extract_matches_from_html_structure(soup: BeautifulSoup, competition_code: str, params: Optional[dict] = None) -> List[Dict]:
     """
     Alternative method to extract matches by parsing HTML structure more broadly.
     """
@@ -1221,8 +1262,8 @@ def extract_matches_from_html_structure(soup: BeautifulSoup, competition_code: s
             match_date = datetime.now().strftime("%Y-%m-%d")
             season = f"{datetime.now().year - 1}/{datetime.now().year}"
             
-            # Try to infer phase from date
-            phase = infer_phase_from_date(competition_code, match_date, season)
+            # Determine phase from date parameters only
+            phase = get_phase_from_params(match_date, competition_code, params)
             
             match_id = generate_match_id(
                 competition_code, season, phase, home_team, away_team, match_date
