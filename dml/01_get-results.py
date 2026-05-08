@@ -914,44 +914,78 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                 continue
             
             # Extract score - FlashScore format can be "2:2" or "2 | 2" or just "2 2"
-            # full_text is already defined above
+            # Priority: Full-time score (including extra time) > Regular time score
             home_goals = None
             away_goals = None
             
-            # Method 1: Look for score pattern with colon "2:2"
-            score_match = re.search(r'(\d+)\s*[:]\s*(\d+)', full_text)
-            if score_match:
-                home_goals = int(score_match.group(1))
-                away_goals = int(score_match.group(2))
+            # Get parent element for checking parent-level scores
+            parent = match_element.find_parent()
             
-            # Method 2: Look for score pattern with pipe "2 | 2" (common in FlashScore)
-            if home_goals is None:
-                # Split by | and look for two consecutive numbers
-                parts = [p.strip() for p in full_text.split('|')]
-                for i in range(len(parts) - 1):
-                    if parts[i].isdigit() and parts[i+1].isdigit():
-                        home_goals = int(parts[i])
-                        away_goals = int(parts[i+1])
-                        break
+            # Method 1: Look in specific score elements - prioritize full-time scores FIRST
+            # FlashScore shows full-time scores in elements with classes like:
+            # - event__score--ft (full time)
+            # - event__score--final
+            # - event__part--ft
+            ft_score_elements = match_element.find_all(['span', 'div'], 
+                                                      class_=re.compile(r'event__score.*ft|event__score.*final|event__part.*ft|event__result.*ft|event__result.*final', re.I))
             
-            # Method 3: Look for two consecutive numbers in text (separated by space or |)
-            if home_goals is None:
-                score_match = re.search(r'(\d+)\s*[|]\s*(\d+)', full_text)
-                if score_match:
-                    home_goals = int(score_match.group(1))
-                    away_goals = int(score_match.group(2))
+            # Also check parent for full-time scores
+            if not ft_score_elements and parent:
+                ft_score_elements = parent.find_all(['span', 'div'], 
+                                                    class_=re.compile(r'event__score.*ft|event__score.*final|event__part.*ft|event__result.*ft|event__result.*final', re.I))
             
-            # Method 4: Look in specific score elements
-            if home_goals is None:
-                score_elements = match_element.find_all(['span', 'div'], 
-                                                       class_=re.compile(r'event__score|event__result|score', re.I))
-                for score_elem in score_elements:
+            # Try full-time score elements first
+            if ft_score_elements:
+                for score_elem in ft_score_elements:
                     score_text = score_elem.get_text(strip=True)
                     score_match = re.search(r'(\d+)\s*[:|]\s*(\d+)', score_text)
                     if score_match:
                         home_goals = int(score_match.group(1))
                         away_goals = int(score_match.group(2))
                         break
+            
+            # Method 2: If no FT score found, look for all score elements and take the LAST one
+            # (FlashScore typically shows: regular time, then full-time, so last = full-time)
+            if home_goals is None:
+                score_elements = match_element.find_all(['span', 'div'], 
+                                                       class_=re.compile(r'event__score|event__result|score', re.I))
+                if not score_elements and parent:
+                    score_elements = parent.find_all(['span', 'div'], 
+                                                     class_=re.compile(r'event__score|event__result|score', re.I))
+                
+                # Try the LAST score element (usually full-time)
+                if score_elements:
+                    # Reverse to check last elements first
+                    for score_elem in reversed(score_elements):
+                        score_text = score_elem.get_text(strip=True)
+                        score_match = re.search(r'(\d+)\s*[:|]\s*(\d+)', score_text)
+                        if score_match:
+                            home_goals = int(score_match.group(1))
+                            away_goals = int(score_match.group(2))
+                            break
+            
+            # Method 3: Fallback - Look for score pattern in full text (take last occurrence)
+            if home_goals is None:
+                # Find all score matches and take the last one (usually full-time)
+                all_score_matches = list(re.finditer(r'(\d+)\s*[:]\s*(\d+)', full_text))
+                if all_score_matches:
+                    # Take the last match (full-time score)
+                    score_match = all_score_matches[-1]
+                    home_goals = int(score_match.group(1))
+                    away_goals = int(score_match.group(2))
+            
+            # Method 4: Fallback - Look for score pattern with pipe "2 | 2"
+            if home_goals is None:
+                parts = [p.strip() for p in full_text.split('|')]
+                # Find all consecutive number pairs and take the last one
+                score_pairs = []
+                for i in range(len(parts) - 1):
+                    if parts[i].isdigit() and parts[i+1].isdigit():
+                        score_pairs.append((int(parts[i]), int(parts[i+1])))
+                
+                if score_pairs:
+                    # Take the last score pair (usually full-time)
+                    home_goals, away_goals = score_pairs[-1]
             
             if home_goals is None or away_goals is None:
                 no_score += 1
