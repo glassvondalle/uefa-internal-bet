@@ -1,5 +1,7 @@
-﻿.venv/
+.venv/
 __pycache__/
 *.pyc
 .streamlit/secrets.toml
 .env
+params/snowflake_config.json
+params/db_config.json

@@ -1,10 +1,8 @@
 """
 European Club Cups Data Scraper
 Scrapes match data from Champions League, Europa League, and Conference League
-from FlashScore.com and formats it for the EUROPEAN_CLUB_CUPS_MATCHES table.
-
-Only includes CLUB teams - filters out any national team results.
-Uses Selenium for JavaScript-heavy sites like FlashScore.
+from FlashScore.com. Only includes club teams (national teams are filtered out).
+Results are saved as CSV files in the output/ directory.
 """
 
 from selenium import webdriver
@@ -106,7 +104,7 @@ def load_scraper_params(params_path: Optional[str] = None) -> dict:
     if params_path is None:
         # Get root directory (parent of script directory)
         root_dir = SCRIPT_DIR.parent
-        params_path = root_dir / "PARAMS" / "scraper_params.json"
+        params_path = root_dir / "params" / "scraper_params.json"
     else:
         # If relative path, make it relative to script directory
         if not os.path.isabs(params_path):
@@ -271,150 +269,12 @@ def generate_match_id(competition: str, season: str, phase: str, home_team: str,
     return f"{competition}_{season_clean}_{phase_clean}_{match_hash}"
 
 
-def infer_phase_from_date(competition_code: str, match_date: str, season: str) -> str:
-    """
-    Infer the competition phase based on match date and competition code.
-    Uses the new format dates for European competitions.
-    
-    Args:
-        competition_code: UCL, UEL, or UECL
-        match_date: Date in YYYY-MM-DD format
-        season: Season in YYYY/YYYY format (e.g., "2024/2025")
-    
-    Returns:
-        Phase string (LEAGUE_PHASE, KNOCKOUT_PHASE, ROUND_OF_16, QUARTER_FINAL, SEMI_FINAL, FINAL)
-    """
-    if not match_date or match_date == "2024-01-01":
-        return "UNKNOWN"
-    
-    try:
-        # Parse the date
-        match_dt = datetime.strptime(match_date, "%Y-%m-%d")
-        year = match_dt.year
-        month = match_dt.month
-        day = match_dt.day
-        
-        # Extract season year (first year of the season)
-        season_year = int(season.split('/')[0])
-        
-        # UCL (Champions League) dates
-        if competition_code == "UCL":
-            # League phase: Sept 16 - Jan 28, 2026
-            league_start = datetime(season_year, 9, 16)
-            league_end = datetime(season_year + 1, 1, 28)
-            
-            # KO phase: Feb 17-25
-            ko_start = datetime(season_year + 1, 2, 17)
-            ko_end = datetime(season_year + 1, 2, 25)
-            
-            # RO16: Mar 10-18
-            ro16_start = datetime(season_year + 1, 3, 10)
-            ro16_end = datetime(season_year + 1, 3, 18)
-            
-            # RO8 (Quarter): Apr 7-15
-            ro8_start = datetime(season_year + 1, 4, 7)
-            ro8_end = datetime(season_year + 1, 4, 15)
-            
-            # Semi: Apr 28 - May 6
-            semi_start = datetime(season_year + 1, 4, 28)
-            semi_end = datetime(season_year + 1, 5, 6)
-            
-            # Final: May 30
-            final_date = datetime(season_year + 1, 5, 30)
-            
-            if league_start <= match_dt <= league_end:
-                return "LEAGUE_PHASE"
-            elif ko_start <= match_dt <= ko_end:
-                return "KNOCKOUT_PHASE"
-            elif ro16_start <= match_dt <= ro16_end:
-                return "ROUND_OF_16"
-            elif ro8_start <= match_dt <= ro8_end:
-                return "QUARTER_FINAL"
-            elif semi_start <= match_dt <= semi_end:
-                return "SEMI_FINAL"
-            elif match_dt.date() == final_date.date():
-                return "FINAL"
-        
-        # UEL (Europa League) dates
-        elif competition_code == "UEL":
-            # KO: Feb 19-25
-            ko_start = datetime(season_year + 1, 2, 19)
-            ko_end = datetime(season_year + 1, 2, 25)
-            
-            # RO16: Mar 12-19
-            ro16_start = datetime(season_year + 1, 3, 12)
-            ro16_end = datetime(season_year + 1, 3, 19)
-            
-            # RO8: Apr 9-16
-            ro8_start = datetime(season_year + 1, 4, 9)
-            ro8_end = datetime(season_year + 1, 4, 16)
-            
-            # Semi: Apr 30 - May 7
-            semi_start = datetime(season_year + 1, 4, 30)
-            semi_end = datetime(season_year + 1, 5, 7)
-            
-            # Final: May 20
-            final_date = datetime(season_year + 1, 5, 20)
-            
-            # League phase: Sept 16 - Jan 28 (same as UCL)
-            league_start = datetime(season_year, 9, 16)
-            league_end = datetime(season_year + 1, 1, 28)
-            
-            if league_start <= match_dt <= league_end:
-                return "LEAGUE_PHASE"
-            elif ko_start <= match_dt <= ko_end:
-                return "KNOCKOUT_PHASE"
-            elif ro16_start <= match_dt <= ro16_end:
-                return "ROUND_OF_16"
-            elif ro8_start <= match_dt <= ro8_end:
-                return "QUARTER_FINAL"
-            elif semi_start <= match_dt <= semi_end:
-                return "SEMI_FINAL"
-            elif match_dt.date() == final_date.date():
-                return "FINAL"
-        
-        # UECL (Conference League) dates - same as UEL except final
-        elif competition_code == "UECL":
-            # KO: Feb 19-25
-            ko_start = datetime(season_year + 1, 2, 19)
-            ko_end = datetime(season_year + 1, 2, 25)
-            
-            # RO16: Mar 12-19
-            ro16_start = datetime(season_year + 1, 3, 12)
-            ro16_end = datetime(season_year + 1, 3, 19)
-            
-            # RO8: Apr 9-16
-            ro8_start = datetime(season_year + 1, 4, 9)
-            ro8_end = datetime(season_year + 1, 4, 16)
-            
-            # Semi: Apr 30 - May 7
-            semi_start = datetime(season_year + 1, 4, 30)
-            semi_end = datetime(season_year + 1, 5, 7)
-            
-            # Final: May 27 (different from UEL)
-            final_date = datetime(season_year + 1, 5, 27)
-            
-            # League phase: Sept 16 - Jan 28 (same as UCL)
-            league_start = datetime(season_year, 9, 16)
-            league_end = datetime(season_year + 1, 1, 28)
-            
-            if league_start <= match_dt <= league_end:
-                return "LEAGUE_PHASE"
-            elif ko_start <= match_dt <= ko_end:
-                return "KNOCKOUT_PHASE"
-            elif ro16_start <= match_dt <= ro16_end:
-                return "ROUND_OF_16"
-            elif ro8_start <= match_dt <= ro8_end:
-                return "QUARTER_FINAL"
-            elif semi_start <= match_dt <= semi_end:
-                return "SEMI_FINAL"
-            elif match_dt.date() == final_date.date():
-                return "FINAL"
-        
-        return "UNKNOWN"
-        
-    except Exception as e:
-        return "UNKNOWN"
+def clean_team_name(team_name: str) -> str:
+    """Remove scraper artefacts like 'Advancing to next round' from team names."""
+    if not team_name:
+        return team_name
+    cleaned = re.sub(r'Advancing to next round', '', team_name, flags=re.IGNORECASE)
+    return cleaned.strip()
 
 
 def parse_date(date_str: str) -> Optional[str]:
@@ -443,7 +303,7 @@ def parse_date(date_str: str) -> Optional[str]:
         try:
             dt = datetime.strptime(date_str, fmt)
             return dt.strftime("%Y-%m-%d")
-        except:
+        except Exception:
             continue
     
     # Try to extract date from string with regex (with year)
@@ -791,17 +651,6 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
             
             home_team = None
             away_team = None
-            
-            # Helper function to clean team name
-            def clean_team_name(team_name: str) -> str:
-                """Remove 'Advancing to next round' and other unwanted text from team names."""
-                if not team_name:
-                    return team_name
-                # Remove 'Advancing to next round' (case insensitive)
-                cleaned = re.sub(r'Advancing to next round', '', team_name, flags=re.IGNORECASE)
-                # Remove any extra whitespace
-                cleaned = cleaned.strip()
-                return cleaned
             
             # Method 1: Extract from participant elements
             if len(participants) >= 2:
@@ -1196,17 +1045,6 @@ def extract_match_from_flashscore_element(element, competition_code: str,
         home_goals = int(score_match.group(1))
         away_goals = int(score_match.group(2))
         
-        # Helper function to clean team name
-        def clean_team_name(team_name: str) -> str:
-            """Remove 'Advancing to next round' and other unwanted text from team names."""
-            if not team_name:
-                return team_name
-            # Remove 'Advancing to next round' (case insensitive)
-            cleaned = re.sub(r'Advancing to next round', '', team_name, flags=re.IGNORECASE)
-            # Remove any extra whitespace
-            cleaned = cleaned.strip()
-            return cleaned
-        
         # Extract team names - they're usually before and after the score
         # Or in separate spans/divs
         team_elements = element.find_all(['span', 'div', 'a'], class_=re.compile(r'team|participant', re.I))
@@ -1266,7 +1104,7 @@ def extract_match_from_flashscore_element(element, competition_code: str,
             "AWAY_GOALS": away_goals
         }
         
-    except:
+    except Exception:
         return None
 
 
@@ -1401,7 +1239,7 @@ def save_matches_to_csv(matches: List[Dict], competition_code: str, filename: Op
     # files folder should be at the same level as the script's folder
     # e.g., if script is in DML/, files should be in files/ at same level
     parent_dir = script_dir.parent
-    files_dir = parent_dir / "files"
+    files_dir = parent_dir / "output"
     files_dir.mkdir(parents=True, exist_ok=True)
     
     # Generate filename if not provided
