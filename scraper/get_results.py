@@ -270,11 +270,12 @@ def generate_match_id(competition: str, season: str, phase: str, home_team: str,
 
 
 def clean_team_name(team_name: str) -> str:
-    """Remove scraper artefacts like 'Advancing to next round' from team names."""
+    """Remove 'Advancing to next round' and everything after it (e.g. ': PSG')."""
     if not team_name:
         return team_name
-    cleaned = re.sub(r'Advancing to next round', '', team_name, flags=re.IGNORECASE)
-    return cleaned.strip()
+    cleaned = re.sub(r'Advancing to next round.*$', '', team_name, flags=re.IGNORECASE)
+    cleaned = cleaned.strip().rstrip(':').strip()
+    return cleaned
 
 
 def parse_date(date_str: str) -> Optional[str]:
@@ -388,9 +389,14 @@ def scrape_flashscore_competition(competition_code: str, limit: Optional[int] = 
     try:
         driver = init_driver(headless=True)
         driver.get(url)
-        
-        # Wait for page to load
-        time.sleep(5)
+
+        # Wait for page to load — use explicit wait for first match element
+        try:
+            WebDriverWait(driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div.event__match"))
+            )
+        except Exception:
+            time.sleep(8)  # fallback if no match element appears within timeout
         
         # Click "Show more matches" button repeatedly to load all matches
         print("   🔄 Looking for 'Show more matches' button to load additional matches...")
