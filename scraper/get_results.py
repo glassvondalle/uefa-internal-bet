@@ -38,7 +38,7 @@ COMPETITIONS = {
     },
     "UECL": {
         "name": "Conference League",
-        "flashscore_url": "https://www.flashscore.com/football/europe/europa-conference-league/results/"
+        "flashscore_url": "https://www.flashscore.com/football/europe/conference-league/results/"
     }
 }
 
