@@ -21,7 +21,7 @@ MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
 
 
 # ---------------------------------------------------------------------------
-# Connection
+# Conexión
 # ---------------------------------------------------------------------------
 
 def _get_db_url() -> str:
@@ -40,7 +40,7 @@ def get_connection():
         conn.autocommit = True
         return conn
     except Exception as e:
-        st.error(f"❌ Could not connect to database: {e}")
+        st.error(f"❌ No se pudo conectar a la base de datos: {e}")
         st.stop()
 
 
@@ -54,12 +54,12 @@ def _fetch(query: str, params=None) -> pd.DataFrame:
         cur.close()
         return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
     except Exception as e:
-        st.error(f"❌ Query error: {e}")
+        st.error(f"❌ Error en consulta: {e}")
         return pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------
-# Queries
+# Consultas
 # ---------------------------------------------------------------------------
 
 def query_reclasificacion() -> pd.DataFrame:
@@ -81,6 +81,96 @@ def query_jugador_details(jugador: str) -> pd.DataFrame:
     )
 
 
+def query_team_statuses() -> pd.DataFrame:
+    """
+    Devuelve (competition, team, is_alive, status_label) para todos los equipos.
+
+    Para rondas de ida y vuelta (Playoff, Octavos, Cuartos, Semis) calcula el
+    ganador por marcador agregado, lo que permite distinguir al eliminado del
+    superviviente incluso antes de que la siguiente ronda se haya jugado.
+    """
+    return _fetch("""
+        WITH
+        -- Marcador agregado por eliminatoria (ida + vuelta)
+        -- LEAST/GREATEST ordena los equipos alfabéticamente para agrupar ambas piernas.
+        -- t1 = equipo con nombre menor, t2 = mayor.
+        tie_agg AS (
+            SELECT competition, phase,
+                LEAST(home_team, away_team)    AS t1,
+                GREATEST(home_team, away_team) AS t2,
+                SUM(CASE WHEN home_team < away_team THEN home_goals ELSE away_goals END) AS t1_goals,
+                SUM(CASE WHEN home_team < away_team THEN away_goals ELSE home_goals END) AS t2_goals
+            FROM european_club_cups_matches
+            WHERE phase IN ('PLAYOFF','ROUND_OF_16','QUARTER_FINAL','SEMI_FINAL')
+            GROUP BY competition, phase,
+                     LEAST(home_team, away_team), GREATEST(home_team, away_team)
+        ),
+        tie_outcomes AS (
+            SELECT competition, phase,
+                CASE WHEN t1_goals > t2_goals THEN t1 WHEN t2_goals > t1_goals THEN t2 END AS winner,
+                CASE WHEN t1_goals > t2_goals THEN t2 WHEN t2_goals > t1_goals THEN t1 END AS loser
+            FROM tie_agg
+        ),
+        -- Final: partido único
+        final_outcome AS (
+            SELECT competition,
+                CASE WHEN home_goals > away_goals THEN home_team ELSE away_team END AS winner,
+                CASE WHEN home_goals > away_goals THEN away_team ELSE home_team END AS loser
+            FROM european_club_cups_matches
+            WHERE phase = 'FINAL' AND home_goals <> away_goals
+        ),
+        -- Todos los eliminados con su fase de eliminación
+        eliminated AS (
+            SELECT competition, phase AS elim_phase, loser AS team
+            FROM   tie_outcomes WHERE loser IS NOT NULL
+            UNION ALL
+            SELECT competition, 'FINAL', loser FROM final_outcome WHERE loser IS NOT NULL
+        ),
+        -- Fase máxima alcanzada por cada equipo
+        team_phases AS (
+            SELECT competition, home_team AS team, phase FROM european_club_cups_matches
+            UNION
+            SELECT competition, away_team, phase FROM european_club_cups_matches
+        ),
+        team_max AS (
+            SELECT competition, team,
+                MAX(CASE phase
+                    WHEN 'LEAGUE_PHASE'  THEN 1
+                    WHEN 'PLAYOFF'       THEN 2
+                    WHEN 'ROUND_OF_16'   THEN 3
+                    WHEN 'QUARTER_FINAL' THEN 4
+                    WHEN 'SEMI_FINAL'    THEN 5
+                    WHEN 'FINAL'         THEN 6
+                    ELSE 0 END) AS max_ord
+            FROM team_phases GROUP BY competition, team
+        ),
+        final_champ AS (
+            SELECT competition, winner AS team FROM final_outcome WHERE winner IS NOT NULL
+        )
+        SELECT
+            tm.competition,
+            tm.team,
+            -- Vivo = no está en la lista de eliminados Y jugó al menos una ronda
+            (el.team IS NULL AND tm.max_ord > 1) AS is_alive,
+            CASE
+                WHEN fc.team  IS NOT NULL              THEN '🏆 Campeón'
+                WHEN el.elim_phase = 'FINAL'           THEN '🥈 Finalista'
+                WHEN el.team IS NULL AND tm.max_ord>=5 THEN '⚽ En la Final'
+                WHEN el.elim_phase = 'SEMI_FINAL'      THEN 'Eliminado en Semifinales'
+                WHEN el.team IS NULL AND tm.max_ord=4  THEN '🔥 En Cuartos de Final'
+                WHEN el.elim_phase = 'QUARTER_FINAL'   THEN 'Eliminado en Cuartos de Final'
+                WHEN el.team IS NULL AND tm.max_ord=3  THEN '🔥 En Octavos de Final'
+                WHEN el.elim_phase = 'ROUND_OF_16'     THEN 'Eliminado en Octavos de Final'
+                WHEN el.team IS NULL AND tm.max_ord=2  THEN '🔥 En Play-off'
+                WHEN el.elim_phase = 'PLAYOFF'         THEN 'Eliminado en Play-off'
+                ELSE                                        'Eliminado en Fase de Liga'
+            END AS status_label
+        FROM      team_max    tm
+        LEFT JOIN eliminated  el ON tm.competition = el.competition AND tm.team = el.team
+        LEFT JOIN final_champ fc ON tm.competition = fc.competition AND tm.team = fc.team
+    """)
+
+
 def query_real_table(competition: str) -> pd.DataFrame:
     return _fetch(
         """
@@ -92,23 +182,11 @@ def query_real_table(competition: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# CSS
 # ---------------------------------------------------------------------------
 
-def get_status(pos) -> str:
-    try:
-        pos = int(float(pos))
-    except (ValueError, TypeError):
-        return "UNKNOWN"
-    if pos <= 8:
-        return "CLASIFICADO"
-    if pos <= 24:
-        return "PLAYOFFS"
-    return "ELIMINADO"
-
-
-def css() -> str:
-    return """
+def inject_css():
+    st.markdown("""
     <style>
     .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
 
@@ -119,69 +197,64 @@ def css() -> str:
         padding: 1.2rem 1rem;
         text-align: center;
     }
-    .metric-card .lbl  { color: #7a8fa6; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1.5px; }
-    .metric-card .val  { color: #FFD700; font-size: 1.9rem; font-weight: 800; line-height: 1.2; }
-    .metric-card .sub  { color: #99aabb; font-size: 0.8rem; margin-top: 0.15rem; }
+    .metric-card .lbl { color: #7a8fa6; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1.5px; }
+    .metric-card .val { color: #FFD700; font-size: 1.9rem; font-weight: 800; line-height: 1.2; }
+    .metric-card .sub { color: #99aabb; font-size: 0.8rem; margin-top: 0.15rem; }
 
     .podium-card {
-        border-radius: 14px;
-        padding: 1.4rem 1rem;
-        text-align: center;
-        height: 100%;
+        border-radius: 14px; padding: 1.4rem 1rem;
+        text-align: center; height: 100%;
     }
     .gold   { background: linear-gradient(135deg, #b8860b, #ffd700); color: #1a0a00; }
     .silver { background: linear-gradient(135deg, #606878, #c0c0c0); color: #111; }
     .bronze { background: linear-gradient(135deg, #7d4e2c, #cd7f32); color: #fff; }
     .podium-card .p-rank { font-size: 2.4rem; }
     .podium-card .p-name { font-size: 1.35rem; font-weight: 800; margin-top: 0.4rem; }
-    .podium-card .p-avg  { font-size: 1.1rem; font-weight: 700; margin-top: 0.25rem; }
-    .podium-card .p-pts  { font-size: 0.85rem; opacity: 0.8; margin-top: 0.1rem; }
+    .podium-card .p-avg  { font-size: 1.1rem;  font-weight: 700; margin-top: 0.25rem; }
+    .podium-card .p-pts  { font-size: 0.85rem; opacity: 0.8;     margin-top: 0.1rem; }
 
     .section-header {
-        font-size: 0.78rem;
-        color: #7a9fc2;
-        text-transform: uppercase;
-        letter-spacing: 2px;
+        font-size: 0.78rem; color: #7a9fc2;
+        text-transform: uppercase; letter-spacing: 2px;
         border-bottom: 1px solid #1e2d3d;
-        padding-bottom: 0.4rem;
-        margin: 1.5rem 0 1rem 0;
+        padding-bottom: 0.4rem; margin: 1.5rem 0 1rem 0;
     }
     </style>
-    """
+    """, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
-# Tab 1: Ranking
+# Tab 1: Clasificación
 # ---------------------------------------------------------------------------
 
 def tab_ranking(df: pd.DataFrame):
-    # Podium
-    st.markdown('<p class="section-header">Podium</p>', unsafe_allow_html=True)
-    top3_cols = st.columns(3)
-    styles = ["gold", "silver", "bronze"]
-    ranks  = ["🥇", "🥈", "🥉"]
+    st.markdown('<p class="section-header">Podio</p>', unsafe_allow_html=True)
+
+    top3_cols  = st.columns(3)
+    pod_styles = ["gold", "silver", "bronze"]
+    medals     = ["🥇", "🥈", "🥉"]
+
     for i, (col, (_, row)) in enumerate(zip(top3_cols, df.head(3).iterrows())):
         col.markdown(f"""
-        <div class="podium-card {styles[i]}">
-            <div class="p-rank">{ranks[i]}</div>
+        <div class="podium-card {pod_styles[i]}">
+            <div class="p-rank">{medals[i]}</div>
             <div class="p-name">{row['JUGADOR']}</div>
-            <div class="p-avg">{float(row['AVG']):.3f} avg</div>
-            <div class="p-pts">{int(row['PTS'])} pts total</div>
+            <div class="p-avg">{float(row['AVG']):.3f} media</div>
+            <div class="p-pts">{int(row['PTS'])} pts totales</div>
         </div>""", unsafe_allow_html=True)
 
-    # Bar chart — avg
-    st.markdown('<p class="section-header">Points per match (avg)</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-header">Puntos por partido (media)</p>', unsafe_allow_html=True)
+
     chart = df.copy()
     chart["AVG"] = chart["AVG"].astype(float)
     chart = chart.sort_values("AVG")
-
-    max_avg = chart["AVG"].max()
-    colors  = [
-        "#FFD700" if i == len(chart) - 1
-        else "#C0C0C0" if i == len(chart) - 2
-        else "#CD7F32" if i == len(chart) - 3
-        else "#3562A6"
-        for i in range(len(chart))
+    n = len(chart)
+    colors = [
+        "#FFD700" if i == n - 1 else
+        "#C0C0C0" if i == n - 2 else
+        "#CD7F32" if i == n - 3 else
+        "#3562A6"
+        for i in range(n)
     ]
 
     fig = go.Figure(go.Bar(
@@ -191,95 +264,95 @@ def tab_ranking(df: pd.DataFrame):
         marker_color=colors,
         text=chart["AVG"].apply(lambda v: f"{v:.3f}"),
         textposition="outside",
-        hovertemplate="<b>%{y}</b><br>Avg: %{x:.3f}<br>Pts: %{customdata}<extra></extra>",
+        hovertemplate="<b>%{y}</b><br>Media: %{x:.3f}<br>Pts: %{customdata}<extra></extra>",
         customdata=chart["PTS"],
     ))
     fig.update_layout(
-        template="plotly_dark",
-        height=420,
-        margin=dict(l=0, r=60, t=0, b=0),
-        xaxis=dict(title="avg pts / match", range=[0, max_avg * 1.22], gridcolor="#1e2d3d"),
+        template="plotly_dark", height=420,
+        margin=dict(l=0, r=70, t=0, b=0),
+        xaxis=dict(title="pts / partido", range=[0, chart["AVG"].max() * 1.22], gridcolor="#1e2d3d"),
         yaxis=dict(title=""),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # Full table
-    st.markdown('<p class="section-header">Full standings</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-header">Clasificación completa</p>', unsafe_allow_html=True)
     display = df.copy().reset_index(drop=True)
     display.index = range(1, len(display) + 1)
-    display.columns = ["Player", "Total Pts", "Avg pts/match"]
+    display.columns = ["Jugador", "Puntos Totales", "Media pts/partido"]
     st.dataframe(display, use_container_width=True)
 
 
 # ---------------------------------------------------------------------------
-# Tab 2: Player Detail
+# Tab 2: Por Jugador
 # ---------------------------------------------------------------------------
 
 def tab_player(df_ranking: pd.DataFrame):
     jugadores = df_ranking["JUGADOR"].tolist()
-    selected  = st.selectbox("Select player:", jugadores)
+    selected  = st.selectbox("Selecciona jugador:", jugadores)
 
     row  = df_ranking[df_ranking["JUGADOR"] == selected].iloc[0]
     rank = jugadores.index(selected) + 1
 
-    # Metric cards
-    st.markdown('<p class="section-header">Overview</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-header">Resumen</p>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     c1.markdown(f"""<div class="metric-card">
-        <div class="lbl">Ranking</div>
+        <div class="lbl">Posición</div>
         <div class="val">{MEDALS.get(rank, f"#{rank}")}</div>
-        <div class="sub">Position {rank} of {len(jugadores)}</div>
+        <div class="sub">Puesto {rank} de {len(jugadores)}</div>
     </div>""", unsafe_allow_html=True)
     c2.markdown(f"""<div class="metric-card">
-        <div class="lbl">Total Points</div>
+        <div class="lbl">Puntos Totales</div>
         <div class="val">{int(row['PTS'])}</div>
-        <div class="sub">Accumulated bet pts</div>
+        <div class="sub">Pts acumulados apuesta</div>
     </div>""", unsafe_allow_html=True)
     c3.markdown(f"""<div class="metric-card">
-        <div class="lbl">Average</div>
+        <div class="lbl">Media</div>
         <div class="val">{float(row['AVG']):.3f}</div>
-        <div class="sub">Points per match</div>
+        <div class="sub">Puntos por partido</div>
     </div>""", unsafe_allow_html=True)
 
     st.markdown("")
 
-    with st.spinner("Loading teams..."):
-        df = query_jugador_details(selected)
+    with st.spinner("Cargando equipos..."):
+        df_details  = query_jugador_details(selected)
+        df_statuses = query_team_statuses()
 
-    if df.empty:
-        st.info("No team data found.")
+    if df_details.empty:
+        st.info("No se encontraron datos de equipos.")
         return
 
-    df["STATUS"] = df["POS"].apply(get_status)
-    df["POS"]    = pd.to_numeric(df["POS"], errors="coerce")
-    comp_order   = {"UCL": 1, "UEL": 2, "UECL": 3}
-    df["_s"]     = df["COMPETITION"].map(comp_order).fillna(9)
-    df           = df.sort_values(["_s", "POS"]).drop("_s", axis=1)
+    # Merge dynamic status
+    df = df_details.merge(
+        df_statuses[["COMPETITION", "TEAM", "IS_ALIVE", "STATUS_LABEL"]],
+        on=["COMPETITION", "TEAM"],
+        how="left",
+    )
+    df["IS_ALIVE"]    = df["IS_ALIVE"].fillna(False)
+    df["STATUS_LABEL"] = df["STATUS_LABEL"].fillna("Sin datos")
 
-    # Points by competition — bar chart
-    st.markdown('<p class="section-header">Betting points by competition</p>', unsafe_allow_html=True)
-    comp_pts = df.groupby("COMPETITION")["PTS"].sum().reset_index()
+    df["POS"] = pd.to_numeric(df["POS"], errors="coerce")
+    comp_order = {"UCL": 1, "UEL": 2, "UECL": 3}
+    df["_s"]   = df["COMPETITION"].map(comp_order).fillna(9)
+    df         = df.sort_values(["_s", "POS"]).drop("_s", axis=1)
+
+    # Points by competition chart
+    st.markdown('<p class="section-header">Puntos de apuesta por competición</p>', unsafe_allow_html=True)
+    comp_pts   = df.groupby("COMPETITION")["PTS"].sum().reset_index()
     bar_colors = [COMPETITION_COLORS.get(c, {}).get("secondary", "#555") for c in comp_pts["COMPETITION"]]
 
     fig2 = go.Figure(go.Bar(
-        x=comp_pts["COMPETITION"],
-        y=comp_pts["PTS"],
+        x=comp_pts["COMPETITION"], y=comp_pts["PTS"],
         marker_color=bar_colors,
-        text=comp_pts["PTS"],
-        textposition="outside",
-        width=0.4,
+        text=comp_pts["PTS"], textposition="outside", width=0.4,
         hovertemplate="<b>%{x}</b><br>Pts: %{y}<extra></extra>",
     ))
     fig2.update_layout(
-        template="plotly_dark",
-        height=260,
+        template="plotly_dark", height=260,
         margin=dict(l=0, r=0, t=10, b=0),
         xaxis=dict(title=""),
-        yaxis=dict(title="Bet pts", gridcolor="#1e2d3d"),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(title="Puntos apuesta", gridcolor="#1e2d3d"),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     )
     st.plotly_chart(fig2, use_container_width=True)
 
@@ -292,63 +365,74 @@ def tab_player(df_ranking: pd.DataFrame):
             unsafe_allow_html=True,
         )
 
-        disp = grp[["TEAM", "MP", "W", "D", "L", "PTS", "POS", "STATUS"]].copy()
-        disp.columns = ["Team", "MP", "W", "D", "L", "Pts", "Pos", "Status"]
+        disp = grp[["TEAM", "MP", "W", "D", "L", "PTS", "IS_ALIVE", "STATUS_LABEL"]].copy()
+        disp.columns = ["Equipo", "PJ", "V", "E", "D", "Pts", "Vivo", "Estado"]
 
         def style_row(row, _c=c):
-            s = row["Status"]
-            if s == "CLASIFICADO":
+            estado = str(row["Estado"])
+            vivo   = row["Vivo"]
+            if "Campeón"   in estado:
+                return ["background-color:#7d6000; color:#FFD700; font-weight:bold"] * len(row)
+            if "Finalista" in estado:
+                return ["background-color:#3a3a4a; color:#C0C0C0; font-style:italic"] * len(row)
+            if vivo:
                 return [f"background-color:{_c['primary']}; color:white"] * len(row)
-            if s == "PLAYOFFS":
-                return [f"background-color:{_c['secondary']}; color:white"] * len(row)
-            return ["background-color:#111; color:#444; text-decoration:line-through"] * len(row)
+            if "Fase de Liga" in estado:
+                return ["background-color:#111; color:#333; text-decoration:line-through"] * len(row)
+            return ["background-color:#1a1a1a; color:#555"] * len(row)
 
         st.dataframe(
-            disp.style.apply(style_row, axis=1),
-            hide_index=True,
-            use_container_width=True,
+            disp.drop(columns=["Vivo"]).style.apply(
+                lambda row: style_row(
+                    pd.concat([row, pd.Series({"Vivo": disp.loc[row.name, "Vivo"],
+                                               "Estado": disp.loc[row.name, "Estado"]})]),
+                    _c=c,
+                ),
+                axis=1,
+            ),
+            hide_index=True, use_container_width=True,
         )
 
-    # Competition summary
-    st.markdown('<p class="section-header">Summary by competition</p>', unsafe_allow_html=True)
+    # Summary by competition
+    st.markdown('<p class="section-header">Resumen por competición</p>', unsafe_allow_html=True)
     summary = (
         df.groupby("COMPETITION")
-        .agg(MP=("MP", "sum"), W=("W", "sum"), D=("D", "sum"), L=("L", "sum"), Pts=("PTS", "sum"))
+        .agg(PJ=("MP", "sum"), V=("W", "sum"), E=("D", "sum"),
+             D=("L", "sum"), Pts=("PTS", "sum"))
         .reset_index()
     )
-    summary.columns = ["Competition", "MP", "W", "D", "L", "Bet Pts"]
+    summary.columns = ["Competición", "PJ", "V", "E", "D", "Pts Apuesta"]
     st.dataframe(summary, hide_index=True, use_container_width=True)
 
 
 # ---------------------------------------------------------------------------
-# Tab 3: Real Table
+# Tab 3: Tabla Real
 # ---------------------------------------------------------------------------
 
 def tab_real_table():
-    st.markdown('<p class="section-header">Real-world standings — 3 pts / win</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-header">Tabla real — 3 pts / victoria</p>', unsafe_allow_html=True)
 
-    comp = st.radio("Competition:", ["UCL", "UEL", "UECL"], horizontal=True)
+    comp = st.radio("Competición:", ["UCL", "UEL", "UECL"], horizontal=True)
     c    = COMPETITION_COLORS[comp]
 
-    with st.spinner(f"Loading {comp}..."):
+    with st.spinner(f"Cargando {comp}..."):
         df = query_real_table(comp)
 
     if df.empty:
-        st.warning("No data.")
+        st.warning("Sin datos.")
         return
 
     df["POS"] = pd.to_numeric(df["POS"], errors="coerce")
 
-    # Bar chart — pts per team
     bar_colors = [
         c["primary"]   if p <=  8 else
         c["secondary"] if p <= 24 else
         "#2a2a2a"
         for p in df["POS"]
     ]
+
     fig = go.Figure(go.Bar(
-        x=df["TEAM"],
-        y=df["PTS"],
+        x=df["TEAM"], y=df["PTS"],
         marker_color=bar_colors,
         text=df["POS"].apply(lambda p: f"#{int(p)}"),
         textposition="outside",
@@ -356,44 +440,37 @@ def tab_real_table():
         customdata=df["POS"],
     ))
     fig.update_layout(
-        template="plotly_dark",
-        height=360,
+        template="plotly_dark", height=360,
         margin=dict(l=0, r=0, t=10, b=80),
         xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
-        yaxis=dict(title="Points", gridcolor="#1e2d3d"),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(title="Puntos", gridcolor="#1e2d3d"),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # Legend
     lc1, lc2, lc3 = st.columns(3)
-    lc1.markdown(f'<span style="background:{c["primary"]};padding:3px 10px;border-radius:6px;color:white;font-size:0.8rem">■ Top 8 — Direct to R16</span>', unsafe_allow_html=True)
-    lc2.markdown(f'<span style="background:{c["secondary"]};padding:3px 10px;border-radius:6px;color:white;font-size:0.8rem">■ 9-24 — Playoff</span>', unsafe_allow_html=True)
-    lc3.markdown('<span style="background:#2a2a2a;padding:3px 10px;border-radius:6px;color:#777;font-size:0.8rem">■ 25-36 — Eliminated</span>', unsafe_allow_html=True)
+    lc1.markdown(f'<span style="background:{c["primary"]};padding:3px 10px;border-radius:6px;color:white;font-size:0.8rem">■ Top 8 — Directo a Octavos</span>', unsafe_allow_html=True)
+    lc2.markdown(f'<span style="background:{c["secondary"]};padding:3px 10px;border-radius:6px;color:white;font-size:0.8rem">■ 9-24 — Play-off</span>', unsafe_allow_html=True)
+    lc3.markdown('<span style="background:#2a2a2a;padding:3px 10px;border-radius:6px;color:#777;font-size:0.8rem">■ 25-36 — Eliminado</span>', unsafe_allow_html=True)
     st.markdown("")
 
-    # Full table with row styling
     disp = df.copy()
-    disp.columns = ["Team", "MP", "W", "D", "L", "GF", "GA", "GD", "Pts", "Pos"]
+    disp.columns = ["Equipo", "PJ", "V", "E", "D", "GF", "GC", "DG", "Pts", "Pos"]
 
     def style_real_row(row, _c=c):
-        pos = row["Pos"]
         try:
-            pos = int(pos)
+            pos = int(row["Pos"])
         except Exception:
             pos = 99
         if pos <=  8:
             return [f"background-color:{_c['primary']}; color:white"] * len(row)
         if pos <= 24:
-            return [f"background-color:#1a2a3a; color:#aac4e0"] * len(row)
+            return ["background-color:#1a2a3a; color:#aac4e0"] * len(row)
         return ["background-color:#111; color:#444"] * len(row)
 
     st.dataframe(
         disp.style.apply(style_real_row, axis=1),
-        hide_index=True,
-        use_container_width=True,
-        height=650,
+        hide_index=True, use_container_width=True, height=650,
     )
 
 
@@ -409,18 +486,18 @@ def main():
         initial_sidebar_state="collapsed",
     )
 
-    st.markdown(css(), unsafe_allow_html=True)
+    inject_css()
     st.markdown("## ⚽ UEFA BET — 2025/26")
     st.markdown("---")
 
-    with st.spinner("Loading data..."):
+    with st.spinner("Cargando datos..."):
         df_ranking = query_reclasificacion()
 
     if df_ranking.empty:
-        st.warning("No data found. Run the scraper and loader first.")
+        st.warning("Sin datos. Ejecuta el scraper primero.")
         return
 
-    t1, t2, t3 = st.tabs(["🏆 Ranking", "👤 Player Detail", "📊 Real Table"])
+    t1, t2, t3 = st.tabs(["🏆 Clasificación", "👤 Por Jugador", "📊 Tabla Real"])
 
     with t1:
         tab_ranking(df_ranking)
