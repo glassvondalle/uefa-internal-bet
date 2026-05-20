@@ -57,7 +57,7 @@ def _fetch(query: str, params=None) -> pd.DataFrame:
 
 def query_reclasificacion() -> pd.DataFrame:
     return _fetch(
-        "SELECT jugador, pts, avg FROM reclasificacion ORDER BY pts DESC, avg DESC NULLS LAST"
+        "SELECT jugador, pts, avg FROM reclasificacion ORDER BY avg DESC NULLS LAST, pts DESC"
     )
 
 
