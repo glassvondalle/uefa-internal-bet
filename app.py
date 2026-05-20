@@ -3,6 +3,7 @@ UEFA BET 2025/26 — Streamlit App
 """
 
 import json
+from collections import Counter
 import streamlit as st
 import psycopg2
 import pandas as pd
@@ -229,6 +230,91 @@ def query_real_table(competition: str) -> pd.DataFrame:
     )
 
 
+def query_all_participants() -> pd.DataFrame:
+    """Returns (jugador, competition, team) for every participant-team pair."""
+    return _fetch("""
+        SELECT p.jugador, a.competition, p.team
+        FROM participantes p
+        JOIN apuesta_table a ON p.team = a.team
+        ORDER BY p.jugador, a.competition
+    """)
+
+
+# ---------------------------------------------------------------------------
+# Estado helpers
+# ---------------------------------------------------------------------------
+
+def format_comp_cell(statuses: list) -> str:
+    """Summarises a player's 3 teams in one competition as a short text string."""
+    alive_cnt = Counter()
+    elim_cnt  = Counter()
+
+    for s in (str(x) for x in statuses):
+        if   '🏆' in s:                  alive_cnt['🏆 Campeón'] += 1
+        elif '⚽' in s:                  alive_cnt['⚽ Final']   += 1
+        elif '🔥 En Cuartos'  in s:      alive_cnt['🔥 Cuartos'] += 1
+        elif '🔥 En Octavos'  in s:      alive_cnt['🔥 Octavos'] += 1
+        elif '🔥 En Play-off' in s:      alive_cnt['🔥 Play-off'] += 1
+        elif '🥈' in s:                  elim_cnt['Final']    += 1
+        elif 'Semifinal'   in s:         elim_cnt['Semis']    += 1
+        elif 'Cuartos'     in s:         elim_cnt['Cuartos']  += 1
+        elif 'Octavos'     in s:         elim_cnt['Octavos']  += 1
+        elif 'Play-off'    in s:         elim_cnt['Play-off'] += 1
+        else:                            elim_cnt['Liga']     += 1
+
+    parts = []
+    for phase in ['🏆 Campeón', '⚽ Final', '🔥 Cuartos', '🔥 Octavos', '🔥 Play-off']:
+        n = alive_cnt.get(phase, 0)
+        if n:
+            parts.append(f"{n} {phase}" if n > 1 else phase)
+
+    for phase in ['Final', 'Semis', 'Cuartos', 'Octavos', 'Play-off', 'Liga']:
+        n = elim_cnt.get(phase, 0)
+        if n:
+            label = '🥈 Finalista' if phase == 'Final' else f'Elim. {phase}'
+            parts.append(f"{n} {label}" if n > 1 else label)
+
+    return ' · '.join(parts) if parts else '—'
+
+
+def get_sanity_check(df_status: pd.DataFrame) -> dict:
+    """
+    For each competition, returns how many teams are alive and the expected count
+    based on the most advanced alive phase.
+
+    Expected alive per competition:
+      ⚽ Final        → 2   (UCL/UEL/UECL have 1 final with 2 teams)
+      🔥 Cuartos      → 8   (4 QF ties × 2 teams)
+      🔥 Octavos      → 16  (8 R16 ties × 2 teams)
+      🏆 Campeón only → 1   (tournament complete)
+      🔥 Play-off     → None (complex: 8 direct + up to 16 in playoff)
+    """
+    result = {}
+    for comp in ['UCL', 'UEL', 'UECL']:
+        labels = df_status.loc[df_status['COMPETITION'] == comp, 'STATUS_LABEL'].fillna('').tolist()
+
+        n_champ   = sum(1 for s in labels if '🏆' in s)
+        n_final   = sum(1 for s in labels if '⚽' in s)
+        n_cuartos = sum(1 for s in labels if '🔥 En Cuartos'  in s)
+        n_octavos = sum(1 for s in labels if '🔥 En Octavos'  in s)
+        n_playoff = sum(1 for s in labels if '🔥 En Play-off' in s)
+        n_alive   = n_champ + n_final + n_cuartos + n_octavos + n_playoff
+
+        if n_champ > 0 and n_final == 0:
+            expected = 1
+        elif n_final > 0:
+            expected = 2
+        elif n_cuartos > 0:
+            expected = 8
+        elif n_octavos > 0:
+            expected = 16
+        else:
+            expected = None
+
+        result[comp] = {'alive': n_alive, 'expected': expected}
+    return result
+
+
 # ---------------------------------------------------------------------------
 # CSS
 # ---------------------------------------------------------------------------
@@ -335,7 +421,7 @@ def tab_ranking(df: pd.DataFrame):
 # Tab 2: Por Jugador
 # ---------------------------------------------------------------------------
 
-def tab_player(df_ranking: pd.DataFrame):
+def tab_player(df_ranking: pd.DataFrame, df_statuses: pd.DataFrame):
     jugadores = df_ranking["JUGADOR"].tolist()
     selected  = st.selectbox("Selecciona jugador:", jugadores)
 
@@ -363,8 +449,7 @@ def tab_player(df_ranking: pd.DataFrame):
     st.markdown("")
 
     with st.spinner("Cargando equipos..."):
-        df_details  = query_jugador_details(selected)
-        df_statuses = query_team_statuses()
+        df_details = query_jugador_details(selected)
 
     if df_details.empty:
         st.info("No se encontraron datos de equipos.")
@@ -448,7 +533,67 @@ def tab_player(df_ranking: pd.DataFrame):
 
 
 # ---------------------------------------------------------------------------
-# Tab 3: Tabla Real
+# Tab 3: Estado
+# ---------------------------------------------------------------------------
+
+def tab_estado(df_status: pd.DataFrame):
+    # --- Sanity check ---
+    sanity = get_sanity_check(df_status)
+    st.markdown('<p class="section-header">Verificación de equipos vivos</p>', unsafe_allow_html=True)
+    cols = st.columns(3)
+    for i, comp in enumerate(['UCL', 'UEL', 'UECL']):
+        c         = COMPETITION_COLORS[comp]
+        n_alive   = sanity[comp]['alive']
+        expected  = sanity[comp]['expected']
+
+        if expected is None:
+            icon = "ℹ️"; sub = "fase en curso"
+        elif n_alive == expected:
+            icon = "✅"; sub = f"esperados: {expected}"
+        else:
+            icon = "⚠️"; sub = f"esperados: {expected} — revisar datos"
+
+        cols[i].markdown(f"""<div class="metric-card">
+            <div class="lbl">{c['icon']} {comp}</div>
+            <div class="val">{n_alive} {icon}</div>
+            <div class="sub">{sub}</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # --- Matrix ---
+    with st.spinner("Cargando estado..."):
+        df_parts = query_all_participants()
+
+    if df_parts.empty:
+        st.warning("Sin datos de participantes.")
+        return
+
+    df = df_parts.merge(
+        df_status[['COMPETITION', 'TEAM', 'STATUS_LABEL']],
+        on=['COMPETITION', 'TEAM'],
+        how='left',
+    )
+    df['STATUS_LABEL'] = df['STATUS_LABEL'].fillna('Sin datos')
+
+    jugadores = sorted(df['JUGADOR'].unique())
+    rows = []
+    for jugador in jugadores:
+        row = {'Jugador': jugador}
+        for comp in ['UCL', 'UEL', 'UECL']:
+            mask     = (df['JUGADOR'] == jugador) & (df['COMPETITION'] == comp)
+            statuses = df.loc[mask, 'STATUS_LABEL'].tolist()
+            row[comp] = format_comp_cell(statuses)
+        rows.append(row)
+
+    matrix = pd.DataFrame(rows)
+
+    st.markdown('<p class="section-header">Estado de equipos por jugador</p>', unsafe_allow_html=True)
+    st.dataframe(matrix, hide_index=True, use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# Tab 4: Tabla Real
 # ---------------------------------------------------------------------------
 
 def tab_real_table():
@@ -534,18 +679,21 @@ def main():
 
     with st.spinner("Cargando datos..."):
         df_ranking = query_reclasificacion()
+        df_status  = query_team_statuses()
 
     if df_ranking.empty:
         st.warning("Sin datos. Ejecuta el scraper primero.")
         return
 
-    t1, t2, t3 = st.tabs(["🏆 Clasificación", "👤 Por Jugador", "📊 Tabla Real"])
+    t1, t2, t3, t4 = st.tabs(["🏆 Clasificación", "👤 Por Jugador", "📋 Estado", "📊 Tabla Real"])
 
     with t1:
         tab_ranking(df_ranking)
     with t2:
-        tab_player(df_ranking)
+        tab_player(df_ranking, df_status)
     with t3:
+        tab_estado(df_status)
+    with t4:
         tab_real_table()
 
 
