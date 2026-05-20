@@ -36,27 +36,28 @@ def _get_db_url() -> str:
 
 @st.cache_resource
 def get_connection():
-    try:
-        conn = psycopg2.connect(_get_db_url())
-        conn.autocommit = True
-        return conn
-    except Exception as e:
-        st.error(f"❌ No se pudo conectar a la base de datos: {e}")
-        st.stop()
+    conn = psycopg2.connect(_get_db_url())
+    conn.autocommit = True
+    return conn
 
 
 def _fetch(query: str, params=None) -> pd.DataFrame:
-    conn = get_connection()
-    try:
-        cur = conn.cursor()
-        cur.execute(query, params)
-        cols = [d[0].upper() for d in cur.description]
-        rows = cur.fetchall()
-        cur.close()
-        return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
-    except Exception as e:
-        st.error(f"❌ Error en consulta: {e}")
-        return pd.DataFrame()
+    # Neon suspends idle connections; retry once with a fresh connection if needed.
+    for attempt in range(2):
+        try:
+            conn = get_connection()
+            cur  = conn.cursor()
+            cur.execute(query, params)
+            cols = [d[0].upper() for d in cur.description]
+            rows = cur.fetchall()
+            cur.close()
+            return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
+        except Exception as e:
+            if attempt == 0:
+                get_connection.clear()   # drop stale connection, reconnect next loop
+            else:
+                st.error(f"❌ Error en consulta: {e}")
+    return pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------
