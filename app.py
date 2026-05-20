@@ -728,8 +728,8 @@ def tab_player(df_ranking: pd.DataFrame, df_statuses: pd.DataFrame):
             if vivo:
                 return [f"background-color:{_c['primary']}; color:white"] * len(row)
             if "Fase de Liga" in estado:
-                return ["background-color:#111; color:#333; text-decoration:line-through"] * len(row)
-            return ["background-color:#1a1a1a; color:#555"] * len(row)
+                return ["background-color:#1c1c1c; color:#777; text-decoration:line-through"] * len(row)
+            return ["background-color:#1c1c1c; color:#888; font-style:italic"] * len(row)
 
         st.dataframe(
             disp.style.apply(style_row, axis=1),
@@ -869,7 +869,7 @@ def tab_league_phase():
             return [f"background-color:{_c['primary']}; color:white"] * len(row)
         if pos <= 24:
             return ["background-color:#1a2a3a; color:#aac4e0"] * len(row)
-        return ["background-color:#111; color:#444"] * len(row)
+        return ["background-color:#1c1c1c; color:#888; font-style:italic"] * len(row)
 
     st.dataframe(
         disp.style.apply(style_real_row, axis=1),
