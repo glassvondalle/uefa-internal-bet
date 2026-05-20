@@ -106,10 +106,58 @@ def query_team_statuses() -> pd.DataFrame:
                      LEAST(home_team, away_team), GREATEST(home_team, away_team)
         ),
         tie_outcomes AS (
-            SELECT competition, phase,
-                CASE WHEN t1_goals > t2_goals THEN t1 WHEN t2_goals > t1_goals THEN t2 END AS winner,
-                CASE WHEN t1_goals > t2_goals THEN t2 WHEN t2_goals > t1_goals THEN t1 END AS loser
-            FROM tie_agg
+            SELECT ta.competition, ta.phase,
+                CASE
+                    WHEN ta.t1_goals > ta.t2_goals THEN ta.t1
+                    WHEN ta.t2_goals > ta.t1_goals THEN ta.t2
+                    -- Aggregate draw (settled by penalties): winner is whichever team
+                    -- appears in the next phase (works once that phase has data).
+                    WHEN ta.t1_goals = ta.t2_goals AND EXISTS (
+                        SELECT 1 FROM european_club_cups_matches m
+                        WHERE m.competition = ta.competition
+                          AND m.phase = CASE ta.phase
+                              WHEN 'PLAYOFF'       THEN 'ROUND_OF_16'
+                              WHEN 'ROUND_OF_16'   THEN 'QUARTER_FINAL'
+                              WHEN 'QUARTER_FINAL' THEN 'SEMI_FINAL'
+                              WHEN 'SEMI_FINAL'    THEN 'FINAL' END
+                          AND (m.home_team = ta.t1 OR m.away_team = ta.t1)
+                    ) THEN ta.t1
+                    WHEN ta.t1_goals = ta.t2_goals AND EXISTS (
+                        SELECT 1 FROM european_club_cups_matches m
+                        WHERE m.competition = ta.competition
+                          AND m.phase = CASE ta.phase
+                              WHEN 'PLAYOFF'       THEN 'ROUND_OF_16'
+                              WHEN 'ROUND_OF_16'   THEN 'QUARTER_FINAL'
+                              WHEN 'QUARTER_FINAL' THEN 'SEMI_FINAL'
+                              WHEN 'SEMI_FINAL'    THEN 'FINAL' END
+                          AND (m.home_team = ta.t2 OR m.away_team = ta.t2)
+                    ) THEN ta.t2
+                END AS winner,
+                CASE
+                    WHEN ta.t1_goals > ta.t2_goals THEN ta.t2
+                    WHEN ta.t2_goals > ta.t1_goals THEN ta.t1
+                    WHEN ta.t1_goals = ta.t2_goals AND EXISTS (
+                        SELECT 1 FROM european_club_cups_matches m
+                        WHERE m.competition = ta.competition
+                          AND m.phase = CASE ta.phase
+                              WHEN 'PLAYOFF'       THEN 'ROUND_OF_16'
+                              WHEN 'ROUND_OF_16'   THEN 'QUARTER_FINAL'
+                              WHEN 'QUARTER_FINAL' THEN 'SEMI_FINAL'
+                              WHEN 'SEMI_FINAL'    THEN 'FINAL' END
+                          AND (m.home_team = ta.t1 OR m.away_team = ta.t1)
+                    ) THEN ta.t2
+                    WHEN ta.t1_goals = ta.t2_goals AND EXISTS (
+                        SELECT 1 FROM european_club_cups_matches m
+                        WHERE m.competition = ta.competition
+                          AND m.phase = CASE ta.phase
+                              WHEN 'PLAYOFF'       THEN 'ROUND_OF_16'
+                              WHEN 'ROUND_OF_16'   THEN 'QUARTER_FINAL'
+                              WHEN 'QUARTER_FINAL' THEN 'SEMI_FINAL'
+                              WHEN 'SEMI_FINAL'    THEN 'FINAL' END
+                          AND (m.home_team = ta.t2 OR m.away_team = ta.t2)
+                    ) THEN ta.t1
+                END AS loser
+            FROM tie_agg ta
         ),
         -- Final: partido único
         final_outcome AS (
