@@ -241,6 +241,163 @@ def query_all_participants() -> pd.DataFrame:
     """)
 
 
+def query_finals() -> pd.DataFrame:
+    """One row per competition: both finalist teams; winner/runnerup populated once played."""
+    return _fetch("""
+        SELECT competition, home_team, away_team, home_goals, away_goals,
+            CASE WHEN home_goals > away_goals THEN home_team
+                 WHEN away_goals > home_goals THEN away_team END AS winner,
+            CASE WHEN home_goals > away_goals THEN away_team
+                 WHEN away_goals > home_goals THEN home_team END AS runnerup
+        FROM european_club_cups_matches
+        WHERE phase = 'FINAL'
+    """)
+
+
+def query_participants_map() -> pd.DataFrame:
+    return _fetch("SELECT jugador, team FROM participantes ORDER BY jugador")
+
+
+# ---------------------------------------------------------------------------
+# Prize helpers
+# ---------------------------------------------------------------------------
+
+def compute_shirt_winners(
+    finals_df: pd.DataFrame,
+    parts_df:  pd.DataFrame,
+    status_df: pd.DataFrame,
+) -> dict:
+    """
+    Assigns one shirt per competition. Priority: UCL → UEL → UECL.
+    The player whose cup-winning team they hold gets the shirt.
+    If that player already holds a higher-priority shirt, the shirt goes
+    to the player who holds the runner-up team instead.
+    Returns {comp: info_dict} where info_dict has keys:
+        state       : 'decided' | 'pending' | 'no_data'
+        (decided)   : winner_team, winner_player, runnerup_team, runnerup_player,
+                      shirt_player, note, home_team, away_team, home_goals, away_goals
+        (pending)   : team1, player1, team2, player2
+    """
+    team_to_player = dict(zip(parts_df['TEAM'], parts_df['JUGADOR']))
+    assigned = {}   # player -> comp of their shirt
+    result   = {}
+
+    for comp in ['UCL', 'UEL', 'UECL']:
+        row = finals_df[finals_df['COMPETITION'] == comp]
+        if row.empty:
+            # Final not recorded yet — derive finalists from status (⚽ En la Final)
+            mask  = (status_df['COMPETITION'] == comp) & status_df['STATUS_LABEL'].str.contains('⚽', na=False)
+            teams = status_df.loc[mask, 'TEAM'].tolist()
+            if len(teams) >= 2:
+                result[comp] = {
+                    'state':   'pending',
+                    'team1':   teams[0], 'player1': team_to_player.get(teams[0]),
+                    'team2':   teams[1], 'player2': team_to_player.get(teams[1]),
+                }
+            else:
+                result[comp] = {'state': 'no_data'}
+            continue
+
+        r = row.iloc[0]
+        home_team = str(r['HOME_TEAM'])
+        away_team = str(r['AWAY_TEAM'])
+        winner_team   = r['WINNER']   if pd.notna(r.get('WINNER'))   else None
+        runnerup_team = r['RUNNERUP'] if pd.notna(r.get('RUNNERUP')) else None
+
+        if winner_team is None:
+            result[comp] = {
+                'state':   'pending',
+                'team1':   home_team, 'player1': team_to_player.get(home_team),
+                'team2':   away_team, 'player2': team_to_player.get(away_team),
+            }
+            continue
+
+        home_goals = int(r['HOME_GOALS']) if pd.notna(r.get('HOME_GOALS')) else None
+        away_goals = int(r['AWAY_GOALS']) if pd.notna(r.get('AWAY_GOALS')) else None
+
+        winner_player   = team_to_player.get(str(winner_team))
+        runnerup_player = team_to_player.get(str(runnerup_team))
+
+        note = None
+        if winner_player not in assigned:
+            shirt_player = winner_player
+        elif winner_player == runnerup_player:
+            # Same player owns both finalist teams — they already have a shirt,
+            # no one else to pass it to.
+            shirt_player = None
+            note = f"{winner_player} ya ganó Copa {assigned[winner_player]} y tiene ambos finalistas"
+        else:
+            note = f"{winner_player} ya ganó Copa {assigned[winner_player]}"
+            shirt_player = runnerup_player
+
+        if shirt_player:
+            assigned[shirt_player] = comp
+
+        result[comp] = {
+            'state':          'decided',
+            'home_team':      home_team,     'away_team':      away_team,
+            'home_goals':     home_goals,    'away_goals':     away_goals,
+            'winner_team':    str(winner_team),   'winner_player':   winner_player,
+            'runnerup_team':  str(runnerup_team),  'runnerup_player': runnerup_player,
+            'shirt_player':   shirt_player,
+            'note':           note,
+        }
+
+    return result
+
+
+def render_prize_section(shirt_winners: dict):
+    st.markdown('<p class="section-header">🎽 Camisetas</p>', unsafe_allow_html=True)
+    cols = st.columns(3)
+
+    for i, comp in enumerate(['UCL', 'UEL', 'UECL']):
+        c    = COMPETITION_COLORS[comp]
+        info = shirt_winners.get(comp, {'state': 'no_data'})
+        state = info.get('state', 'no_data')
+
+        header = f'<div class="pc-comp" style="color:{c["light"]}">{c["icon"]} {comp}</div>'
+
+        if state == 'no_data':
+            html = f"""<div class="prize-card">
+                {header}
+                <div class="pc-pend" style="color:#555">Sin datos de final</div>
+            </div>"""
+
+        elif state == 'pending':
+            t1, p1 = info['team1'], info.get('player1') or '—'
+            t2, p2 = info['team2'], info.get('player2') or '—'
+            html = f"""<div class="prize-card">
+                {header}
+                <div class="pc-pend">⏳ Final por jugarse</div>
+                <div class="pc-team">⚽ {t1}</div>
+                <div class="pc-pl">{p1}</div>
+                <div class="pc-team">⚽ {t2}</div>
+                <div class="pc-pl">{p2}</div>
+            </div>"""
+
+        else:  # decided
+            wt  = info['winner_team'];   wp  = info['winner_player']  or '—'
+            rt  = info['runnerup_team']; rp  = info['runnerup_player'] or '—'
+            sp  = info['shirt_player']  or '—'
+            hg, ag = info.get('home_goals'), info.get('away_goals')
+            note = info.get('note') or ''
+
+            score_html = (f'<div class="pc-score">{info["home_team"]} {hg}–{ag} {info["away_team"]}</div>'
+                          if hg is not None else '')
+            note_html  = f'<div class="pc-note">⚠️ {note}</div>' if note else ''
+
+            html = f"""<div class="prize-card" style="border-color:{c['secondary']}88">
+                {header}
+                {score_html}
+                <div class="pc-row">🏆 {wt} → <b>{wp}</b></div>
+                <div class="pc-row">🥈 {rt} → <b>{rp}</b></div>
+                <div class="pc-shirt" style="color:{c['light']}">🎽 {sp}</div>
+                {note_html}
+            </div>"""
+
+        cols[i].markdown(html, unsafe_allow_html=True)
+
+
 # ---------------------------------------------------------------------------
 # Estado helpers
 # ---------------------------------------------------------------------------
@@ -354,6 +511,22 @@ def inject_css():
         border-bottom: 1px solid #1e2d3d;
         padding-bottom: 0.4rem; margin: 1.5rem 0 1rem 0;
     }
+
+    .prize-card {
+        background: linear-gradient(135deg, #0d0d1a 0%, #1a1a2e 100%);
+        border: 1px solid #2a2a3a;
+        border-radius: 12px;
+        padding: 1.1rem 1rem;
+        min-height: 155px;
+    }
+    .prize-card .pc-comp  { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 2px; font-weight: 700; margin-bottom: 0.5rem; }
+    .prize-card .pc-score { font-size: 0.75rem; color: #666; margin-bottom: 0.5rem; }
+    .prize-card .pc-row   { font-size: 0.84rem; color: #ccc; margin: 0.2rem 0; }
+    .prize-card .pc-shirt { font-size: 1.05rem; font-weight: 800; margin-top: 0.75rem; }
+    .prize-card .pc-note  { font-size: 0.7rem; color: #888; font-style: italic; margin-top: 0.25rem; }
+    .prize-card .pc-pend  { font-size: 0.8rem; color: #666; margin: 0.4rem 0 0.6rem; }
+    .prize-card .pc-team  { font-size: 0.84rem; color: #aaa; margin: 0.15rem 0; }
+    .prize-card .pc-pl    { font-size: 0.78rem; color: #777; padding-left: 1.2rem; margin-bottom: 0.2rem; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -362,14 +535,34 @@ def inject_css():
 # Tab 1: Clasificación
 # ---------------------------------------------------------------------------
 
-def tab_ranking(df: pd.DataFrame):
+def tab_ranking(df: pd.DataFrame, shirt_winners: dict):
+    # --- Prize section ---
+    render_prize_section(shirt_winners)
+
+    # Which players won a shirt (only from decided finals)?
+    shirt_players = {
+        info['shirt_player']
+        for info in shirt_winners.values()
+        if info.get('state') == 'decided' and info.get('shirt_player')
+    }
+    player_to_cup = {
+        info['shirt_player']: comp
+        for comp, info in shirt_winners.items()
+        if info.get('state') == 'decided' and info.get('shirt_player')
+    }
+
+    # Regular ranking excludes shirt winners
+    df_regular = df[~df['JUGADOR'].isin(shirt_players)].copy().reset_index(drop=True)
+    df_cups    = df[ df['JUGADOR'].isin(shirt_players)].copy()
+
+    # --- Podio (regular ranking only) ---
     st.markdown('<p class="section-header">Podio</p>', unsafe_allow_html=True)
 
     top3_cols  = st.columns(3)
     pod_styles = ["gold", "silver", "bronze"]
     medals     = ["🥇", "🥈", "🥉"]
 
-    for i, (col, (_, row)) in enumerate(zip(top3_cols, df.head(3).iterrows())):
+    for i, (col, (_, row)) in enumerate(zip(top3_cols, df_regular.head(3).iterrows())):
         col.markdown(f"""
         <div class="podium-card {pod_styles[i]}">
             <div class="p-rank">{medals[i]}</div>
@@ -378,9 +571,10 @@ def tab_ranking(df: pd.DataFrame):
             <div class="p-pts">{int(row['PTS'])} pts totales</div>
         </div>""", unsafe_allow_html=True)
 
+    # --- Bar chart (regular ranking only) ---
     st.markdown('<p class="section-header">Puntos por partido (media)</p>', unsafe_allow_html=True)
 
-    chart = df.copy()
+    chart = df_regular.copy()
     chart["AVG"] = chart["AVG"].astype(float)
     chart = chart.sort_values("AVG")
     n = len(chart)
@@ -403,7 +597,7 @@ def tab_ranking(df: pd.DataFrame):
         customdata=chart["PTS"],
     ))
     fig.update_layout(
-        template="plotly_dark", height=420,
+        template="plotly_dark", height=max(280, 50 * n),
         margin=dict(l=0, r=70, t=0, b=0),
         xaxis=dict(title="pts / partido", range=[0, chart["AVG"].max() * 1.22], gridcolor="#1e2d3d"),
         yaxis=dict(title=""),
@@ -411,11 +605,32 @@ def tab_ranking(df: pd.DataFrame):
     )
     st.plotly_chart(fig, use_container_width=True)
 
+    # --- Clasificación completa ---
     st.markdown('<p class="section-header">Clasificación completa</p>', unsafe_allow_html=True)
-    display = df.copy().reset_index(drop=True)
-    display.index = range(1, len(display) + 1)
-    display.columns = ["Jugador", "Puntos Totales", "Media pts/partido"]
-    st.dataframe(display, use_container_width=True)
+
+    disp = df_regular.copy()
+    disp.index = range(1, len(disp) + 1)
+    disp.columns = ["Jugador", "Puntos Totales", "Media pts/partido"]
+    st.dataframe(disp, use_container_width=True)
+
+    # Cup winners pinned at the bottom with gold styling
+    if not df_cups.empty:
+        for _, row in df_cups.iterrows():
+            cup  = player_to_cup.get(row['JUGADOR'], '?')
+            c    = COMPETITION_COLORS.get(cup, {})
+            st.markdown(f"""
+            <div style="background:linear-gradient(90deg,#2a1800,#1a1000);
+                        border:1px solid #b8860b55; border-radius:8px;
+                        padding:0.6rem 1.1rem; margin:0.3rem 0;
+                        display:flex; justify-content:space-between; align-items:center;">
+                <span style="color:#FFD700;font-weight:700;font-size:0.95rem">{row['JUGADOR']}</span>
+                <span style="color:#888;font-size:0.82rem">
+                    {float(row['AVG']):.3f} media &nbsp;·&nbsp; {int(row['PTS'])} pts
+                </span>
+                <span style="color:#b8860b;font-size:0.85rem">
+                    🎽 Ganador Copa {cup} {c.get('icon','')}
+                </span>
+            </div>""", unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -679,17 +894,21 @@ def main():
     st.markdown("---")
 
     with st.spinner("Cargando datos..."):
-        df_ranking = query_reclasificacion()
-        df_status  = query_team_statuses()
+        df_ranking  = query_reclasificacion()
+        df_status   = query_team_statuses()
+        df_finals   = query_finals()
+        df_parts_map = query_participants_map()
 
     if df_ranking.empty:
         st.warning("Sin datos. Ejecuta el scraper primero.")
         return
 
+    shirt_winners = compute_shirt_winners(df_finals, df_parts_map, df_status)
+
     t1, t2, t3, t4 = st.tabs(["🏆 Clasificación", "👤 Por Jugador", "📋 Estado", "📊 Tabla Real"])
 
     with t1:
-        tab_ranking(df_ranking)
+        tab_ranking(df_ranking, shirt_winners)
     with t2:
         tab_player(df_ranking, df_status)
     with t3:
