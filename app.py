@@ -221,11 +221,11 @@ def query_team_statuses() -> pd.DataFrame:
     """)
 
 
-def query_real_table(competition: str) -> pd.DataFrame:
+def query_league_phase_table(competition: str) -> pd.DataFrame:
     return _fetch(
         """
         SELECT team, mp, w, d, l, gf, ga, gd, pts, pos
-        FROM real_table WHERE competition = %s ORDER BY pos
+        FROM real_table_league_phase WHERE competition = %s ORDER BY pos
         """,
         (competition,),
     )
@@ -812,14 +812,14 @@ def tab_estado(df_status: pd.DataFrame):
 # Tab 4: Tabla Real
 # ---------------------------------------------------------------------------
 
-def tab_real_table():
-    st.markdown('<p class="section-header">Tabla real — 3 pts / victoria</p>', unsafe_allow_html=True)
+def tab_league_phase():
+    st.markdown('<p class="section-header">Tabla Fase de Liga — 3 pts / victoria</p>', unsafe_allow_html=True)
 
     comp = st.radio("Competición:", ["UCL", "UEL", "UECL"], horizontal=True)
     c    = COMPETITION_COLORS[comp]
 
     with st.spinner(f"Cargando {comp}..."):
-        df = query_real_table(comp)
+        df = query_league_phase_table(comp)
 
     if df.empty:
         st.warning("Sin datos.")
@@ -905,7 +905,7 @@ def main():
 
     shirt_winners = compute_shirt_winners(df_finals, df_parts_map, df_status)
 
-    t1, t2, t3, t4 = st.tabs(["🏆 Clasificación", "👤 Por Jugador", "📋 Estado", "📊 Tabla Real"])
+    t1, t2, t3, t4 = st.tabs(["🏆 Clasificación", "👤 Por Jugador", "📋 Estado", "📊 Fase de Liga"])
 
     with t1:
         tab_ranking(df_ranking, shirt_winners)
@@ -914,7 +914,7 @@ def main():
     with t3:
         tab_estado(df_status)
     with t4:
-        tab_real_table()
+        tab_league_phase()
 
 
 if __name__ == "__main__":
