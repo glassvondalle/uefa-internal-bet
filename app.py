@@ -365,12 +365,13 @@ def tab_player(df_ranking: pd.DataFrame):
             unsafe_allow_html=True,
         )
 
-        disp = grp[["TEAM", "MP", "W", "D", "L", "PTS", "IS_ALIVE", "STATUS_LABEL"]].copy()
-        disp.columns = ["Equipo", "PJ", "V", "E", "D", "Pts", "Vivo", "Estado"]
+        disp = grp[["TEAM", "MP", "W", "D", "L", "PTS", "STATUS_LABEL"]].copy()
+        disp.columns = ["Equipo", "PJ", "V", "E", "D", "Pts", "Estado"]
 
         def style_row(row, _c=c):
             estado = str(row["Estado"])
-            vivo   = row["Vivo"]
+            # Alive teams have a live emoji in their label
+            vivo = any(e in estado for e in ("🏆", "⚽", "🔥"))
             if "Campeón"   in estado:
                 return ["background-color:#7d6000; color:#FFD700; font-weight:bold"] * len(row)
             if "Finalista" in estado:
@@ -382,14 +383,7 @@ def tab_player(df_ranking: pd.DataFrame):
             return ["background-color:#1a1a1a; color:#555"] * len(row)
 
         st.dataframe(
-            disp.drop(columns=["Vivo"]).style.apply(
-                lambda row: style_row(
-                    pd.concat([row, pd.Series({"Vivo": disp.loc[row.name, "Vivo"],
-                                               "Estado": disp.loc[row.name, "Estado"]})]),
-                    _c=c,
-                ),
-                axis=1,
-            ),
+            disp.style.apply(style_row, axis=1),
             hide_index=True, use_container_width=True,
         )
 
