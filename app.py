@@ -868,8 +868,8 @@ def tab_league_phase():
         if pos <=  8:
             return [f"background-color:{_c['primary']}; color:white"] * len(row)
         if pos <= 24:
-            return ["background-color:#1a2a3a; color:#aac4e0"] * len(row)
-        return ["background-color:#1c1c1c; color:#888; font-style:italic"] * len(row)
+            return [f"background-color:{_c['secondary']}; color:white"] * len(row)
+        return ["background-color:#2a2a2a; color:#888; font-style:italic"] * len(row)
 
     st.dataframe(
         disp.style.apply(style_real_row, axis=1),
