@@ -197,64 +197,79 @@ def is_match_in_any_phase(match_date: str, competition_code: str, params: dict) 
 
 def get_phase_from_params(match_date: str, competition_code: str, params: Optional[dict]) -> str:
     """
-    Determine PHASE based on match date and date parameters from scraper_params.json.
-    
-    Args:
-        match_date: Match date in YYYY-MM-DD format
-        competition_code: Competition code (UCL, UEL, UECL)
-        params: Dictionary with scraper parameters (from scraper_params.json)
-    
-    Returns:
-        Phase string: "LEAGUE_PHASE", "PLAYOFFS", or "KNOCKOUT_PHASE" based on date ranges
+    Return the exact phase name for a match date by checking all date ranges in
+    scraper_params.json. Phase names are derived directly from the param keys,
+    e.g. UCL_ROUND_OF_16_INITIAL_DATE -> ROUND_OF_16.
     """
-    if not match_date or match_date == "2024-01-01":
+    if not match_date or match_date == "2024-01-01" or not params:
         return "UNKNOWN"
-    
-    if not params:
-        return "UNKNOWN"
-    
+
     try:
-        # Parse match date
         match_dt = datetime.strptime(match_date, "%Y-%m-%d")
-        
-        # Check LEAGUE_PHASE date range
-        league_initial_key = f"{competition_code}_LEAGUE_PHASE_INITIAL_DATE"
-        league_end_key = f"{competition_code}_LEAGUE_PHASE_END_DATE"
-        
-        league_initial_str = params.get(league_initial_key)
-        league_end_str = params.get(league_end_key)
-        
-        if league_initial_str and league_end_str:
-            league_initial_dt = datetime.strptime(league_initial_str, "%Y-%m-%d")
-            league_end_dt = datetime.strptime(league_end_str, "%Y-%m-%d")
-            
-            if league_initial_dt <= match_dt <= league_end_dt:
-                return "LEAGUE_PHASE"
-        
-        # Check PLAYOFF date range
-        playoff_initial_key = f"{competition_code}_PLAYOFF_INITIAL_DATE"
-        playoff_end_key = f"{competition_code}_PLAYOFF_END_DATE"
-        
-        playoff_initial_str = params.get(playoff_initial_key)
-        playoff_end_str = params.get(playoff_end_key)
-        
-        if playoff_initial_str and playoff_end_str:
-            playoff_initial_dt = datetime.strptime(playoff_initial_str, "%Y-%m-%d")
-            playoff_end_dt = datetime.strptime(playoff_end_str, "%Y-%m-%d")
-            
-            if playoff_initial_dt <= match_dt <= playoff_end_dt:
-                return "PLAYOFFS"
-        
-        # If not in LEAGUE_PHASE or PLAYOFFS, return KNOCKOUT_PHASE
-        return "KNOCKOUT_PHASE"
-        
-    except ValueError as e:
-        # Date parsing error
-        print(f"   ⚠️  Date parsing error for {match_date} in {competition_code}: {e}")
+        for key in params:
+            if key.startswith(f"{competition_code}_") and key.endswith("_INITIAL_DATE"):
+                phase = key.replace(f"{competition_code}_", "").replace("_INITIAL_DATE", "")
+                end_key = f"{competition_code}_{phase}_END_DATE"
+                if end_key not in params:
+                    continue
+                try:
+                    start = datetime.strptime(params[key], "%Y-%m-%d")
+                    end   = datetime.strptime(params[end_key], "%Y-%m-%d")
+                    if start <= match_dt <= end:
+                        return phase
+                except ValueError:
+                    continue
         return "UNKNOWN"
-    except Exception as e:
-        print(f"   ⚠️  Error determining phase for {competition_code}: {e}")
+    except Exception:
         return "UNKNOWN"
+
+
+# Expected match counts per competition per phase.
+# Same knockout structure for all three; league phase differs for UECL (6 games vs 8).
+EXPECTED_MATCHES_PER_PHASE = {
+    "UCL":  {"LEAGUE_PHASE": 144, "PLAYOFF": 16, "ROUND_OF_16": 16, "QUARTER_FINAL": 8, "SEMI_FINAL": 4, "FINAL": 1},
+    "UEL":  {"LEAGUE_PHASE": 144, "PLAYOFF": 16, "ROUND_OF_16": 16, "QUARTER_FINAL": 8, "SEMI_FINAL": 4, "FINAL": 1},
+    "UECL": {"LEAGUE_PHASE": 108, "PLAYOFF": 16, "ROUND_OF_16": 16, "QUARTER_FINAL": 8, "SEMI_FINAL": 4, "FINAL": 1},
+}
+
+
+def validate_matches(matches: List[Dict], competition_code: str) -> bool:
+    """
+    Print expected vs actual match count per phase.
+    Returns True if all completed phases match expectations.
+    """
+    expected = EXPECTED_MATCHES_PER_PHASE.get(competition_code, {})
+    today = datetime.now()
+
+    actual: Dict[str, int] = {}
+    for m in matches:
+        phase = m["PHASE"]
+        actual[phase] = actual.get(phase, 0) + 1
+
+    all_phases = sorted(set(list(expected.keys()) + list(actual.keys())))
+
+    print(f"\n   {'Phase':<20} {'Expected':>8} {'Actual':>8}  Status")
+    print(f"   {'-'*52}")
+
+    all_ok = True
+    for phase in all_phases:
+        exp = expected.get(phase)
+        act = actual.get(phase, 0)
+
+        if exp is None:
+            status = "⚠️  unexpected phase"
+        elif act == exp:
+            status = "✅"
+        elif act < exp:
+            status = f"❌  missing {exp - act}"
+            all_ok = False
+        else:
+            status = f"⚠️  extra {act - exp}"
+
+        exp_str = str(exp) if exp is not None else "?"
+        print(f"   {phase:<20} {exp_str:>8} {act:>8}  {status}")
+
+    return all_ok
 
 
 def generate_match_id(competition: str, season: str, phase: str, home_team: str, 
@@ -270,11 +285,15 @@ def generate_match_id(competition: str, season: str, phase: str, home_team: str,
 
 
 def clean_team_name(team_name: str) -> str:
-    """Remove 'Advancing to next round' and everything after it (e.g. ': PSG')."""
+    """Remove FlashScore artefacts from team names."""
     if not team_name:
         return team_name
+    # Remove "Advancing to next round" label and everything after it
     cleaned = re.sub(r'Advancing to next round.*$', '', team_name, flags=re.IGNORECASE)
+    # Strip trailing colons left over from the above
     cleaned = cleaned.strip().rstrip(':').strip()
+    # Strip trailing isolated digits (e.g. "Real Madrid2" -> "Real Madrid")
+    cleaned = re.sub(r'(?<=[a-zA-Z])\d+$', '', cleaned).strip()
     return cleaned
 
 
@@ -399,82 +418,59 @@ def scrape_flashscore_competition(competition_code: str, limit: Optional[int] = 
             time.sleep(8)  # fallback if no match element appears within timeout
         
         # Click "Show more matches" button repeatedly to load all matches
-        print("   🔄 Looking for 'Show more matches' button to load additional matches...")
-        max_attempts = 5
+        print("   🔄 Loading all matches...")
+        max_attempts = 10
         attempts = 0
         previous_match_count = 0
-        
+
         while attempts < max_attempts:
             try:
-                # Scroll to bottom to ensure button is visible
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(1.5)
-                
-                # Count current matches before clicking
-                try:
-                    current_matches = driver.find_elements(By.CSS_SELECTOR, "div.event__match, div[class*='event__match']")
-                    previous_match_count = len(current_matches)
-                except:
-                    previous_match_count = 0
-                
-                # Try multiple methods to find the "Show more matches" button
+                time.sleep(2)
+
+                current_matches = driver.find_elements(By.CSS_SELECTOR, "div.event__match")
+                previous_match_count = len(current_matches)
+
+                # Target the footer pagination button specifically.
+                # FlashScore uses wcl-footer__button for the results "Show more matches"
+                # button. Avoid sidebar elements (leftMenu) which also contain "Show more".
                 show_more_button = None
-                
-                # Method 1: Exact text match "Show more matches" (case-insensitive)
+
+                # Priority 1: footer button by class
                 try:
-                    # Try as link
-                    buttons = driver.find_elements(By.XPATH, "//a[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'show more matches')]")
-                    if not buttons:
-                        # Try as button
-                        buttons = driver.find_elements(By.XPATH, "//button[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'show more matches')]")
-                    if not buttons:
-                        # Try as div/span with click handler
-                        buttons = driver.find_elements(By.XPATH, "//*[contains(translate(normalize-space(text()), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'show more matches')]")
-                    
-                    for btn in buttons:
-                        if btn.is_displayed():
+                    candidates = driver.find_elements(By.CSS_SELECTOR, "button[class*='wcl-footer__button']")
+                    for btn in candidates:
+                        if btn.is_displayed() and "more" in btn.text.lower():
                             show_more_button = btn
                             break
-                except Exception as e:
+                except Exception:
                     pass
-                
-                # Method 2: Try by partial text match
+
+                # Priority 2: any <button> with "show more matches" text, excluding sidebar
                 if not show_more_button:
                     try:
-                        buttons = driver.find_elements(By.PARTIAL_LINK_TEXT, "Show more")
-                        if not buttons:
-                            buttons = driver.find_elements(By.PARTIAL_LINK_TEXT, "more matches")
-                        for btn in buttons:
-                            if btn.is_displayed() and "more matches" in btn.text.lower():
+                        candidates = driver.find_elements(By.XPATH,
+                            "//button[contains(translate(normalize-space(text()),"
+                            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),"
+                            "'show more matches')]")
+                        for btn in candidates:
+                            classes = btn.get_attribute("class") or ""
+                            if btn.is_displayed() and "leftMenu" not in classes:
                                 show_more_button = btn
                                 break
-                    except:
+                    except Exception:
                         pass
-                
-                # Method 3: Try by class names commonly used by FlashScore
+
+                # Priority 3: footer container > any clickable "show more"
                 if not show_more_button:
                     try:
-                        selectors = [
-                            "a.event__more",
-                            "button.event__more",
-                            "div.event__more a",
-                            "div.event__more button",
-                            "[class*='event__more']",
-                            "[class*='show-more']",
-                            "[class*='load-more']"
-                        ]
-                        for selector in selectors:
-                            try:
-                                elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                                for elem in elements:
-                                    if elem.is_displayed() and ("more" in elem.text.lower() or "matches" in elem.text.lower()):
-                                        show_more_button = elem
-                                        break
-                                if show_more_button:
-                                    break
-                            except:
-                                continue
-                    except:
+                        candidates = driver.find_elements(By.CSS_SELECTOR,
+                            "[class*='wcl-footer'] *")
+                        for btn in candidates:
+                            if btn.is_displayed() and "more" in btn.text.lower():
+                                show_more_button = btn
+                                break
+                    except Exception:
                         pass
                 
                 if show_more_button:
@@ -988,11 +984,12 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                 if params:
                     is_in_range = is_match_in_any_phase(match_date, competition_code, params)
                     if not is_in_range:
-                        # Debug: show why match was filtered
-                        if successful + failed < 5:  # Show first few filtered matches
-                            print(f"   ⚠️  Filtered out (date outside any phase range): {home_team} vs {away_team} on {match_date}")
+                        # Only log if the date looks like it belongs to the current season
+                        season_start = params.get(f"{competition_code}_LEAGUE_PHASE_INITIAL_DATE", "")
+                        if season_start and match_date >= season_start:
+                            print(f"   ⚠️  Dropped (no matching phase): {home_team} vs {away_team} on {match_date}")
                         failed += 1
-                        continue  # Skip this match if it's outside all phase date ranges
+                        continue
                 
                 match_id = generate_match_id(
                     competition_code, season, phase, home_team, away_team, match_date
@@ -1212,12 +1209,15 @@ def fetch_all_competitions(limit_per_competition: Optional[int] = None,
         all_matches_by_competition[competition_code] = club_matches
         all_matches.extend(club_matches)
         
-        print(f"✅ Retrieved {len(club_matches)} club matches from {comp_config['name']}\n")
-        
+        print(f"✅ Retrieved {len(club_matches)} club matches from {comp_config['name']}")
+
+        # Validate match counts per phase
+        validate_matches(club_matches, competition_code)
+
         # Save CSV file for this competition
         if save_csv and club_matches:
             save_matches_to_csv(club_matches, competition_code)
-        
+
         # Delay between competitions
         time.sleep(3)
     
