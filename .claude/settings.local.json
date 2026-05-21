@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm scraper/debug_pagination.py)",
+      "Bash(PYTHONUTF8=1 python scraper/get_results.py)"
+    ]
+  }
+}

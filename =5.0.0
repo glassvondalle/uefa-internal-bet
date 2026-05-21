@@ -1,0 +1,11 @@
+Collecting plotly
+  Downloading plotly-6.7.0-py3-none-any.whl.metadata (8.6 kB)
+Requirement already satisfied: narwhals>=1.15.1 in c:\users\glass\onedrive\bkp_cloud\onedrive\documentos\academia\proyectos\new_bet_app\.venv\lib\site-packages (from plotly) (2.21.2)
+Requirement already satisfied: packaging in c:\users\glass\onedrive\bkp_cloud\onedrive\documentos\academia\proyectos\new_bet_app\.venv\lib\site-packages (from plotly) (26.2)
+Downloading plotly-6.7.0-py3-none-any.whl (9.9 MB)
+   ---------------------------------------- 9.9/9.9 MB 19.3 MB/s eta 0:00:00
+Installing collected packages: plotly
+Successfully installed plotly-6.7.0
+
+[notice] A new release of pip is available: 25.0.1 -> 26.1.1
+[notice] To update, run: python.exe -m pip install --upgrade pip

@@ -290,8 +290,9 @@ def clean_team_name(team_name: str) -> str:
         return team_name
     # Remove "Pen " prefix shown on penalty-round winners (e.g. "Pen Panathinaikos")
     cleaned = re.sub(r'^Pen\s+', '', team_name, flags=re.IGNORECASE)
-    # Remove "Advancing to next round" label and everything after it
+    # Remove "Advancing to next round" / "Winner: X" labels and everything after them
     cleaned = re.sub(r'Advancing to next round.*$', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'Winner:.*$', '', cleaned, flags=re.IGNORECASE)
     # Strip trailing colons left over from the above
     cleaned = cleaned.strip().rstrip(':').strip()
     # Strip trailing isolated digits (e.g. "Real Madrid2" -> "Real Madrid")
@@ -797,9 +798,12 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                         away_goals = int(score_match.group(2))
                         break
             
-            # Method 2: If no FT score found, look for all score elements and take the FIRST one.
-            # FlashScore displays the official (ET-inclusive) score first; any partial/90-min
-            # score appears afterwards as a secondary element — so first = correct result.
+            # Method 2: Collect all X:Y scores from score elements, then pick the best.
+            # Rule: prefer a non-draw result (A≠B) over a draw (A=A).
+            # Rationale: ET only triggers when 90-min ends in a draw, so the 90-min score
+            # is always X:X and the ET total is always A:B (A≠B). Preferring non-draw
+            # selects the ET total without touching normal matches (single result) or
+            # pen matches (match score is still X:X, no non-draw to confuse).
             if home_goals is None:
                 score_elements = match_element.find_all(['span', 'div'],
                                                        class_=re.compile(r'event__score|event__result|score', re.I))
@@ -808,35 +812,35 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                                                      class_=re.compile(r'event__score|event__result|score', re.I))
 
                 if score_elements:
+                    found = []
                     for score_elem in score_elements:
                         score_text = score_elem.get_text(strip=True)
-                        score_match = re.search(r'(\d+)\s*[:|]\s*(\d+)', score_text)
-                        if score_match:
-                            home_goals = int(score_match.group(1))
-                            away_goals = int(score_match.group(2))
-                            break
+                        m = re.search(r'(\d+)\s*[:|]\s*(\d+)', score_text)
+                        if m:
+                            found.append((int(m.group(1)), int(m.group(2))))
+                    if found:
+                        non_draw = [(h, a) for h, a in found if h != a]
+                        home_goals, away_goals = (non_draw or found)[-1]
 
-            # Method 3: Fallback - Look for score pattern in full text (take FIRST occurrence).
-            # For ET matches FlashScore shows ET total first, then 90-min in parentheses/secondary.
-            # For pen matches the main X:Y score is the match result (pen goals use a different format).
+            # Method 3: Fallback - all X:Y patterns in full text; prefer non-draw, take last.
             if home_goals is None:
                 all_score_matches = list(re.finditer(r'(\d+)\s*[:]\s*(\d+)', full_text))
                 if all_score_matches:
-                    score_match = all_score_matches[0]
-                    home_goals = int(score_match.group(1))
-                    away_goals = int(score_match.group(2))
+                    pairs = [(int(m.group(1)), int(m.group(2))) for m in all_score_matches]
+                    non_draw = [(h, a) for h, a in pairs if h != a]
+                    home_goals, away_goals = (non_draw or pairs)[-1]
 
-            # Method 4: Fallback - Look for score pattern with pipe "2 | 2"
-            # Take the FIRST consecutive digit pair (ET/official score comes before 90-min partial).
+            # Method 4: Fallback - consecutive digit pairs in pipe-separated text;
+            # prefer non-draw, take last.
             if home_goals is None:
                 parts = [p.strip() for p in full_text.split('|')]
                 score_pairs = []
                 for i in range(len(parts) - 1):
                     if parts[i].isdigit() and parts[i+1].isdigit():
                         score_pairs.append((int(parts[i]), int(parts[i+1])))
-
                 if score_pairs:
-                    home_goals, away_goals = score_pairs[0]
+                    non_draw = [(h, a) for h, a in score_pairs if h != a]
+                    home_goals, away_goals = (non_draw or score_pairs)[-1]
             
             if home_goals is None or away_goals is None:
                 no_score += 1
