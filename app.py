@@ -386,14 +386,14 @@ def render_prize_section(shirt_winners: dict):
                           if hg is not None else '')
             note_html  = f'<div class="pc-note">⚠️ {note}</div>' if note else ''
 
-            html = f"""<div class="prize-card" style="border-color:{c['secondary']}88">
-                {header}
-                {score_html}
-                <div class="pc-row">🏆 {wt} → <b>{wp}</b></div>
-                <div class="pc-row">🥈 {rt} → <b>{rp}</b></div>
-                <div class="pc-shirt" style="color:{c['light']}">🎽 {sp}</div>
-                {note_html}
-            </div>"""
+            html = (
+                f'<div class="prize-card" style="border-color:{c["secondary"]}88">'
+                f'{header}{score_html}'
+                f'<div class="pc-row">🏆 {wt} → <b>{wp}</b></div>'
+                f'<div class="pc-row">🥈 {rt} → <b>{rp}</b></div>'
+                f'<div class="pc-shirt" style="color:{c["light"]}">🎽 {sp}</div>'
+                f'{note_html}</div>'
+            )
 
         cols[i].markdown(html, unsafe_allow_html=True)
 
@@ -571,20 +571,27 @@ def tab_ranking(df: pd.DataFrame, shirt_winners: dict):
             <div class="p-pts">{int(row['PTS'])} pts totales</div>
         </div>""", unsafe_allow_html=True)
 
-    # --- Bar chart (regular ranking only) ---
+    # --- Bar chart (all players; cup winners pinned at the bottom in gold) ---
     st.markdown('<p class="section-header">Puntos por partido (media)</p>', unsafe_allow_html=True)
 
-    chart = df_regular.copy()
-    chart["AVG"] = chart["AVG"].astype(float)
-    chart = chart.sort_values("AVG")
-    n = len(chart)
-    colors = [
-        "#FFD700" if i == n - 1 else
-        "#C0C0C0" if i == n - 2 else
-        "#CD7F32" if i == n - 3 else
+    reg = df_regular.copy()
+    reg["AVG"] = reg["AVG"].astype(float)
+    reg = reg.sort_values("AVG")
+    n_reg = len(reg)
+    reg_colors = [
+        "#FFD700" if i == n_reg - 1 else
+        "#C0C0C0" if i == n_reg - 2 else
+        "#CD7F32" if i == n_reg - 3 else
         "#3562A6"
-        for i in range(n)
+        for i in range(n_reg)
     ]
+
+    cups = df_cups.copy()
+    cups["AVG"] = cups["AVG"].astype(float)
+
+    # Cups first so they appear at the very bottom of the horizontal chart
+    chart  = pd.concat([cups, reg], ignore_index=True)
+    colors = ["#b8860b"] * len(cups) + reg_colors
 
     fig = go.Figure(go.Bar(
         y=chart["JUGADOR"],
@@ -597,7 +604,7 @@ def tab_ranking(df: pd.DataFrame, shirt_winners: dict):
         customdata=chart["PTS"],
     ))
     fig.update_layout(
-        template="plotly_dark", height=max(280, 50 * n),
+        template="plotly_dark", height=max(280, 50 * len(chart)),
         margin=dict(l=0, r=70, t=0, b=0),
         xaxis=dict(title="pts / partido", range=[0, chart["AVG"].max() * 1.22], gridcolor="#1e2d3d"),
         yaxis=dict(title=""),
