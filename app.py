@@ -586,20 +586,31 @@ def tab_ranking(df: pd.DataFrame, shirt_winners: dict):
         for i in range(n_reg)
     ]
 
-    cups = df_cups.copy()
-    cups["AVG"] = cups["AVG"].astype(float)
+    # All players sorted by avg — cup winners appear at their natural position
+    # with competition color + inside label; regular players keep medal colors.
+    chart = df.copy()
+    chart["AVG"] = chart["AVG"].astype(float)
+    chart = chart.sort_values("AVG")
 
-    # Per-bar properties for cup winners: competition color + label inside the bar
-    cup_colors  = [COMPETITION_COLORS.get(player_to_cup.get(j, ""), {}).get("secondary", "#b8860b")
-                   for j in cups["JUGADOR"]]
-    cup_texts   = [f"🎽 Ganador {player_to_cup.get(j, '')}" for j in cups["JUGADOR"]]
-    cup_textpos = ["inside"] * len(cups)
-
-    # Cups first → bottom of horizontal chart; regular players above
-    chart    = pd.concat([cups, reg], ignore_index=True)
-    colors   = cup_colors   + reg_colors
-    texts    = cup_texts    + reg["AVG"].apply(lambda v: f"{v:.3f}").tolist()
-    textpos  = cup_textpos  + ["outside"] * len(reg)
+    colors, texts, textpos = [], [], []
+    for i, (_, row) in enumerate(chart.iterrows()):
+        j = row["JUGADOR"]
+        if j in player_to_cup:
+            comp = player_to_cup[j]
+            colors.append(COMPETITION_COLORS.get(comp, {}).get("secondary", "#b8860b"))
+            texts.append(f"🎽 Ganador {comp}")
+            textpos.append("inside")
+        else:
+            # rank among regular players only (reg is already sorted ascending)
+            ri = list(reg["JUGADOR"]).index(j) if j in reg["JUGADOR"].values else 0
+            colors.append(
+                "#FFD700" if ri == n_reg - 1 else
+                "#C0C0C0" if ri == n_reg - 2 else
+                "#CD7F32" if ri == n_reg - 3 else
+                "#3562A6"
+            )
+            texts.append(f"{float(row['AVG']):.3f}")
+            textpos.append("outside")
 
     fig = go.Figure(go.Bar(
         y=chart["JUGADOR"],
