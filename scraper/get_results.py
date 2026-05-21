@@ -771,6 +771,11 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
             # Priority: Full-time score (including extra time) > Regular time score
             home_goals = None
             away_goals = None
+
+            # Detect penalty shootout: FlashScore labels the winning team with "Pen".
+            # Penalty matches end in a DRAW at 90+ET; the match score IS the draw.
+            # ET-with-goals matches end in a non-draw; we want the non-draw score.
+            has_pen = bool(re.search(r'\bpen\b', full_text, re.IGNORECASE))
             
             # Get parent element for checking parent-level scores
             parent = match_element.find_parent()
@@ -788,15 +793,21 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                 ft_score_elements = parent.find_all(['span', 'div'], 
                                                     class_=re.compile(r'event__score.*ft|event__score.*final|event__part.*ft|event__result.*ft|event__result.*final', re.I))
             
-            # Try full-time score elements first
+            # Try full-time score elements first, applying pen-aware selection.
             if ft_score_elements:
+                ft_found = []
                 for score_elem in ft_score_elements:
                     score_text = score_elem.get_text(strip=True)
-                    score_match = re.search(r'(\d+)\s*[:|]\s*(\d+)', score_text)
-                    if score_match:
-                        home_goals = int(score_match.group(1))
-                        away_goals = int(score_match.group(2))
-                        break
+                    m = re.search(r'(\d+)\s*[:|]\s*(\d+)', score_text)
+                    if m:
+                        ft_found.append((int(m.group(1)), int(m.group(2))))
+                if ft_found:
+                    draw    = [(h, a) for h, a in ft_found if h == a]
+                    no_draw = [(h, a) for h, a in ft_found if h != a]
+                    if has_pen:
+                        home_goals, away_goals = (draw or ft_found)[0]
+                    else:
+                        home_goals, away_goals = (no_draw or ft_found)[-1]
             
             # Method 2: Collect all X:Y scores from score elements, then pick the best.
             # Rule: prefer a non-draw result (A≠B) over a draw (A=A).
@@ -819,19 +830,27 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                         if m:
                             found.append((int(m.group(1)), int(m.group(2))))
                     if found:
-                        non_draw = [(h, a) for h, a in found if h != a]
-                        home_goals, away_goals = (non_draw or found)[-1]
+                        draw    = [(h, a) for h, a in found if h == a]
+                        no_draw = [(h, a) for h, a in found if h != a]
+                        if has_pen:
+                            home_goals, away_goals = (draw or found)[0]
+                        else:
+                            home_goals, away_goals = (no_draw or found)[-1]
 
-            # Method 3: Fallback - all X:Y patterns in full text; prefer non-draw, take last.
+            # Method 3: Fallback - all X:Y patterns in full text.
+            # Pen match → use draw score (match ended level). ET → prefer non-draw.
             if home_goals is None:
                 all_score_matches = list(re.finditer(r'(\d+)\s*[:]\s*(\d+)', full_text))
                 if all_score_matches:
-                    pairs = [(int(m.group(1)), int(m.group(2))) for m in all_score_matches]
-                    non_draw = [(h, a) for h, a in pairs if h != a]
-                    home_goals, away_goals = (non_draw or pairs)[-1]
+                    pairs   = [(int(m.group(1)), int(m.group(2))) for m in all_score_matches]
+                    draw    = [(h, a) for h, a in pairs if h == a]
+                    no_draw = [(h, a) for h, a in pairs if h != a]
+                    if has_pen:
+                        home_goals, away_goals = (draw or pairs)[0]
+                    else:
+                        home_goals, away_goals = (no_draw or pairs)[-1]
 
-            # Method 4: Fallback - consecutive digit pairs in pipe-separated text;
-            # prefer non-draw, take last.
+            # Method 4: Fallback - consecutive digit pairs in pipe-separated text.
             if home_goals is None:
                 parts = [p.strip() for p in full_text.split('|')]
                 score_pairs = []
@@ -839,8 +858,12 @@ def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup,
                     if parts[i].isdigit() and parts[i+1].isdigit():
                         score_pairs.append((int(parts[i]), int(parts[i+1])))
                 if score_pairs:
-                    non_draw = [(h, a) for h, a in score_pairs if h != a]
-                    home_goals, away_goals = (non_draw or score_pairs)[-1]
+                    draw    = [(h, a) for h, a in score_pairs if h == a]
+                    no_draw = [(h, a) for h, a in score_pairs if h != a]
+                    if has_pen:
+                        home_goals, away_goals = (draw or score_pairs)[0]
+                    else:
+                        home_goals, away_goals = (no_draw or score_pairs)[-1]
             
             if home_goals is None or away_goals is None:
                 no_score += 1
