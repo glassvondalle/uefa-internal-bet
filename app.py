@@ -589,17 +589,26 @@ def tab_ranking(df: pd.DataFrame, shirt_winners: dict):
     cups = df_cups.copy()
     cups["AVG"] = cups["AVG"].astype(float)
 
-    # Cups first so they appear at the very bottom of the horizontal chart
-    chart  = pd.concat([cups, reg], ignore_index=True)
-    colors = ["#b8860b"] * len(cups) + reg_colors
+    # Per-bar properties for cup winners: competition color + label inside the bar
+    cup_colors  = [COMPETITION_COLORS.get(player_to_cup.get(j, ""), {}).get("secondary", "#b8860b")
+                   for j in cups["JUGADOR"]]
+    cup_texts   = [f"🎽 Ganador {player_to_cup.get(j, '')}" for j in cups["JUGADOR"]]
+    cup_textpos = ["inside"] * len(cups)
+
+    # Cups first → bottom of horizontal chart; regular players above
+    chart    = pd.concat([cups, reg], ignore_index=True)
+    colors   = cup_colors   + reg_colors
+    texts    = cup_texts    + reg["AVG"].apply(lambda v: f"{v:.3f}").tolist()
+    textpos  = cup_textpos  + ["outside"] * len(reg)
 
     fig = go.Figure(go.Bar(
         y=chart["JUGADOR"],
         x=chart["AVG"],
         orientation="h",
         marker_color=colors,
-        text=chart["AVG"].apply(lambda v: f"{v:.3f}"),
-        textposition="outside",
+        text=texts,
+        textposition=textpos,
+        insidetextanchor="middle",
         hovertemplate="<b>%{y}</b><br>Media: %{x:.3f}<br>Pts: %{customdata}<extra></extra>",
         customdata=chart["PTS"],
     ))
