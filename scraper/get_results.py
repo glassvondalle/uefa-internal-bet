@@ -1,8 +1,7 @@
 """
 European Club Cups Data Scraper
 Scrapes match data from Champions League, Europa League, and Conference League
-from FlashScore.com. Only includes club teams (national teams are filtered out).
-Results are saved as CSV files in the output/ directory.
+from FlashScore.com. Results are saved as CSV files in the output/ directory.
 """
 
 from selenium import webdriver
@@ -10,7 +9,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -18,15 +16,12 @@ import hashlib
 import re
 import time
 import csv
-import os
 import json
 import sys
 from pathlib import Path
 
-# Get the directory where this script is located
 SCRIPT_DIR = Path(__file__).parent.absolute()
 
-# Competition configurations for FlashScore
 COMPETITIONS = {
     "UCL": {
         "name": "Champions League",
@@ -42,86 +37,27 @@ COMPETITIONS = {
     }
 }
 
-# Common national team indicators to filter out
-NATIONAL_TEAM_INDICATORS = [
-    "national team", "national squad", "country team"
-]
-
-# Common club indicators
-CLUB_INDICATORS = ["FC", "CF", "AC", "AS", "SC", "United", "City", "Real", "Bayern", 
-                   "Barcelona", "Madrid", "Chelsea", "Arsenal", "Liverpool", "Manchester",
-                   "Club", "Athletic", "Sporting", "Olympique", "Paris", "Milan", "Inter"]
-
-
-def is_club_team(team_name: str) -> bool:
-    """
-    Check if a team is a club team (not a national team).
-    Filters out national teams based on common patterns.
-    """
-    if not team_name or len(team_name.strip()) < 3:
-        return False
-    
-    team_lower = team_name.lower().strip()
-    
-    # Check for explicit national team indicators
-    for indicator in NATIONAL_TEAM_INDICATORS:
-        if indicator in team_lower:
-            return False
-    
-    # Check if it's just a country name (likely national team)
-    country_only_patterns = [
-        r'^(england|spain|france|germany|italy|portugal|netherlands|belgium|'
-        r'poland|greece|turkey|russia|ukraine|sweden|norway|denmark|'
-        r'croatia|serbia|romania|bulgaria|hungary|czech|slovakia|switzerland|'
-        r'austria|scotland|wales|ireland|finland|iceland)$'
-    ]
-    
-    for pattern in country_only_patterns:
-        if re.match(pattern, team_lower):
-            has_club_indicator = any(ind.lower() in team_lower for ind in CLUB_INDICATORS)
-            if not has_club_indicator:
-                return False
-    
-    # If team name contains club indicators, it's definitely a club
-    if any(ind.lower() in team_lower for ind in CLUB_INDICATORS):
-        return True
-    
-    # Default: assume it's a club (most teams in these competitions are clubs)
-    return True
+# Expected match counts per competition per phase.
+# Same knockout structure for all three; league phase differs for UECL (6 games vs 8).
+EXPECTED_MATCHES_PER_PHASE = {
+    "UCL":  {"LEAGUE_PHASE": 144, "PLAYOFF": 16, "ROUND_OF_16": 16, "QUARTER_FINAL": 8, "SEMI_FINAL": 4, "FINAL": 1},
+    "UEL":  {"LEAGUE_PHASE": 144, "PLAYOFF": 16, "ROUND_OF_16": 16, "QUARTER_FINAL": 8, "SEMI_FINAL": 4, "FINAL": 1},
+    "UECL": {"LEAGUE_PHASE": 108, "PLAYOFF": 16, "ROUND_OF_16": 16, "QUARTER_FINAL": 8, "SEMI_FINAL": 4, "FINAL": 1},
+}
 
 
 def load_scraper_params(params_path: Optional[str] = None) -> dict:
-    """
-    Load scraper parameters from JSON file.
-    
-    Args:
-        params_path: Path to the parameters file (default: scraper_params.json in PARAMS directory at root level)
-    
-    Returns:
-        Dictionary with scraper parameters
-    """
-    # If no path provided, use default in PARAMS directory at root level
     if params_path is None:
-        # Get root directory (parent of script directory)
-        root_dir = SCRIPT_DIR.parent
-        params_path = root_dir / "params" / "scraper_params.json"
+        params_path = SCRIPT_DIR.parent / "params" / "scraper_params.json"
     else:
-        # If relative path, make it relative to script directory
-        if not os.path.isabs(params_path):
-            params_path = SCRIPT_DIR / params_path
-        else:
-            params_path = Path(params_path)
-    
+        p = Path(params_path)
+        params_path = p if p.is_absolute() else SCRIPT_DIR / params_path
+
     try:
         with open(params_path, 'r') as f:
-            params = json.load(f)
-        return params
+            return json.load(f)
     except FileNotFoundError:
         print(f"❌ Parameters file not found: {params_path}")
-        print(f"   Looking in: {params_path.absolute()}")
-        print(f"   Script directory: {SCRIPT_DIR}")
-        print(f"   Root directory: {SCRIPT_DIR.parent}")
-        print(f"   Expected PARAMS directory: {SCRIPT_DIR.parent / 'PARAMS'}")
         sys.exit(1)
     except json.JSONDecodeError as e:
         print(f"❌ Error parsing parameters file: {e}")
@@ -129,79 +65,37 @@ def load_scraper_params(params_path: Optional[str] = None) -> dict:
 
 
 def is_match_in_any_phase(match_date: str, competition_code: str, params: dict) -> bool:
-    """
-    Check if a match date falls within any phase date range for the competition.
-    Dynamically checks all phase date ranges defined in params (LEAGUE_PHASE, PLAYOFF, etc.).
-    
-    Args:
-        match_date: Match date in YYYY-MM-DD format
-        competition_code: Competition code (UCL, UEL, UECL)
-        params: Dictionary with scraper parameters
-    
-    Returns:
-        True if match is within any phase date range, False otherwise
-    """
-    if not match_date or match_date == "2024-01-01":
+    """Returns True if match_date falls within any phase date range for the competition."""
+    if not match_date or not params:
         return False
-    
-    if not params:
-        return False
-    
+
     try:
-        # Parse match date
         match_dt = datetime.strptime(match_date, "%Y-%m-%d")
-        
-        # Find all phase date ranges in params for this competition
-        # Look for keys like: {COMPETITION}_*_INITIAL_DATE and {COMPETITION}_*_END_DATE
-        phase_ranges = {}
-        
-        for key in params.keys():
+        for key in params:
             if key.startswith(f"{competition_code}_") and key.endswith("_INITIAL_DATE"):
-                # Extract phase name (e.g., "LEAGUE_PHASE" or "PLAYOFF")
                 phase_name = key.replace(f"{competition_code}_", "").replace("_INITIAL_DATE", "")
-                end_date_key = f"{competition_code}_{phase_name}_END_DATE"
-                
-                if end_date_key in params:
-                    initial_date_str = params.get(key)
-                    end_date_str = params.get(end_date_key)
-                    
-                    if initial_date_str and end_date_str:
-                        try:
-                            initial_dt = datetime.strptime(initial_date_str, "%Y-%m-%d")
-                            end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
-                            phase_ranges[phase_name] = (initial_dt, end_dt)
-                        except ValueError:
-                            continue
-        
-        # If no phase ranges found, include all matches (backward compatibility)
-        if not phase_ranges:
-            print(f"   ⚠️  Warning: No phase date ranges found for {competition_code}. Including all matches.")
-            return True
-        
-        # Check if match date falls within any phase date range
-        for phase_name, (initial_dt, end_dt) in phase_ranges.items():
-            if initial_dt <= match_dt <= end_dt:
-                return True
-        
-        # Match date is not within any phase range
+                end_key = f"{competition_code}_{phase_name}_END_DATE"
+                if end_key not in params:
+                    continue
+                try:
+                    start = datetime.strptime(params[key], "%Y-%m-%d")
+                    end = datetime.strptime(params[end_key], "%Y-%m-%d")
+                    if start <= match_dt <= end:
+                        return True
+                except ValueError:
+                    continue
         return False
-        
     except ValueError as e:
-        # Date parsing error - might be wrong format
         print(f"   ⚠️  Date parsing error for {match_date} in {competition_code}: {e}")
-        return False  # Exclude match if date can't be parsed
+        return False
     except Exception as e:
         print(f"   ⚠️  Error checking date ranges for {competition_code}: {e}")
-        return True  # Include match if there's an error
+        return True
 
 
 def get_phase_from_params(match_date: str, competition_code: str, params: Optional[dict]) -> str:
-    """
-    Return the exact phase name for a match date by checking all date ranges in
-    scraper_params.json. Phase names are derived directly from the param keys,
-    e.g. UCL_ROUND_OF_16_INITIAL_DATE -> ROUND_OF_16.
-    """
-    if not match_date or match_date == "2024-01-01" or not params:
+    """Returns the phase name for a match date based on scraper_params.json date ranges."""
+    if not match_date or not params:
         return "UNKNOWN"
 
     try:
@@ -214,7 +108,7 @@ def get_phase_from_params(match_date: str, competition_code: str, params: Option
                     continue
                 try:
                     start = datetime.strptime(params[key], "%Y-%m-%d")
-                    end   = datetime.strptime(params[end_key], "%Y-%m-%d")
+                    end = datetime.strptime(params[end_key], "%Y-%m-%d")
                     if start <= match_dt <= end:
                         return phase
                 except ValueError:
@@ -224,22 +118,9 @@ def get_phase_from_params(match_date: str, competition_code: str, params: Option
         return "UNKNOWN"
 
 
-# Expected match counts per competition per phase.
-# Same knockout structure for all three; league phase differs for UECL (6 games vs 8).
-EXPECTED_MATCHES_PER_PHASE = {
-    "UCL":  {"LEAGUE_PHASE": 144, "PLAYOFF": 16, "ROUND_OF_16": 16, "QUARTER_FINAL": 8, "SEMI_FINAL": 4, "FINAL": 1},
-    "UEL":  {"LEAGUE_PHASE": 144, "PLAYOFF": 16, "ROUND_OF_16": 16, "QUARTER_FINAL": 8, "SEMI_FINAL": 4, "FINAL": 1},
-    "UECL": {"LEAGUE_PHASE": 108, "PLAYOFF": 16, "ROUND_OF_16": 16, "QUARTER_FINAL": 8, "SEMI_FINAL": 4, "FINAL": 1},
-}
-
-
 def validate_matches(matches: List[Dict], competition_code: str) -> bool:
-    """
-    Print expected vs actual match count per phase.
-    Returns True if all completed phases match expectations.
-    """
+    """Prints expected vs actual match count per phase. Returns True if all completed phases match."""
     expected = EXPECTED_MATCHES_PER_PHASE.get(competition_code, {})
-    today = datetime.now()
 
     actual: Dict[str, int] = {}
     for m in matches:
@@ -272,11 +153,8 @@ def validate_matches(matches: List[Dict], competition_code: str) -> bool:
     return all_ok
 
 
-def generate_match_id(competition: str, season: str, phase: str, home_team: str, 
+def generate_match_id(competition: str, season: str, phase: str, home_team: str,
                       away_team: str, match_date: str) -> str:
-    """
-    Generate a unique MATCH_ID based on match attributes.
-    """
     match_string = f"{competition}|{season}|{phase}|{home_team}|{away_team}|{match_date}"
     match_hash = hashlib.md5(match_string.encode()).hexdigest()[:8].upper()
     phase_clean = re.sub(r'[^A-Z0-9_]', '_', phase.upper())[:20]
@@ -293,7 +171,6 @@ def clean_team_name(team_name: str) -> str:
     # Remove "Advancing to next round" / "Winner: X" labels and everything after them
     cleaned = re.sub(r'Advancing to next round.*$', '', cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r'Winner:.*$', '', cleaned, flags=re.IGNORECASE)
-    # Strip trailing colons left over from the above
     cleaned = cleaned.strip().rstrip(':').strip()
     # Strip trailing isolated digits (e.g. "Real Madrid2" -> "Real Madrid")
     cleaned = re.sub(r'(?<=[a-zA-Z])\d+$', '', cleaned).strip()
@@ -301,73 +178,50 @@ def clean_team_name(team_name: str) -> str:
 
 
 def parse_date(date_str: str) -> Optional[str]:
-    """
-    Parse various date formats to YYYY-MM-DD.
-    """
+    """Parse various date formats to YYYY-MM-DD."""
     if not date_str:
         return None
-    
+
     date_str = date_str.strip()
-    
-    # Try common formats
+
     formats = [
-        "%d.%m.%Y",
-        "%d/%m/%Y",
-        "%Y-%m-%d",
-        "%d %B %Y",
-        "%d %b %Y",
-        "%B %d, %Y",
-        "%b %d, %Y",
-        "%d.%m.%y",
-        "%d/%m/%y"
+        "%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d",
+        "%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y",
+        "%d.%m.%y", "%d/%m/%y"
     ]
-    
+
     for fmt in formats:
         try:
-            dt = datetime.strptime(date_str, fmt)
-            return dt.strftime("%Y-%m-%d")
+            return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
         except Exception:
             continue
-    
-    # Try to extract date from string with regex (with year)
+
     date_match = re.search(r'(\d{1,2})[./](\d{1,2})[./](\d{4})', date_str)
     if date_match:
         day, month, year = date_match.groups()
         try:
-            dt = datetime(int(year), int(month), int(day))
-            return dt.strftime("%Y-%m-%d")
-        except:
+            return datetime(int(year), int(month), int(day)).strftime("%Y-%m-%d")
+        except Exception:
             pass
-    
-    # Try DD.MM format (without year) - infer year
+
+    # DD.MM without year — infer from context
     date_match = re.search(r'(\d{1,2})\.(\d{1,2})(?!\.)', date_str)
     if date_match:
         day, month = date_match.groups()
         try:
             current_year = datetime.now().year
-            # If month is in future, likely previous year
-            if int(month) > datetime.now().month:
-                year = current_year - 1
-            else:
-                year = current_year
-            
+            year = current_year - 1 if int(month) > datetime.now().month else current_year
             dt = datetime(year, int(month), int(day))
-            # If date is too far in future, it's probably previous year
             if dt > datetime.now():
-                year = year - 1
-                dt = datetime(year, int(month), int(day))
-            
+                dt = datetime(year - 1, int(month), int(day))
             return dt.strftime("%Y-%m-%d")
-        except:
+        except Exception:
             pass
-    
+
     return None
 
 
 def init_driver(headless: bool = True) -> webdriver.Chrome:
-    """
-    Initialize Chrome WebDriver with appropriate options.
-    """
     chrome_options = Options()
     if headless:
         chrome_options.add_argument('--headless')
@@ -377,50 +231,36 @@ def init_driver(headless: bool = True) -> webdriver.Chrome:
     chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
-    
+
     try:
-        driver = webdriver.Chrome(options=chrome_options)
-        return driver
+        return webdriver.Chrome(options=chrome_options)
     except Exception as e:
         print(f"❌ Error initializing Chrome driver: {e}")
         print("   Make sure ChromeDriver is installed and in your PATH")
-        print("   Download from: https://chromedriver.chromium.org/")
         raise
 
 
-def scrape_flashscore_competition(competition_code: str, limit: Optional[int] = None, params: Optional[dict] = None) -> List[Dict]:
-    """
-    Scrape match results from FlashScore for a competition.
-    
-    Args:
-        competition_code: UCL, UEL, or UECL
-        limit: Maximum number of matches to return (None for all)
-        params: Dictionary with scraper parameters (season and date ranges)
-    
-    Returns:
-        List of match dictionaries
-    """
+def scrape_flashscore_competition(competition_code: str, params: Optional[dict] = None) -> List[Dict]:
+    """Scrape match results from FlashScore for a competition."""
     comp_config = COMPETITIONS.get(competition_code)
     if not comp_config:
         return []
-    
+
     url = comp_config["flashscore_url"]
     print(f"🔎 Scraping {comp_config['name']} from FlashScore: {url}")
-    
+
     driver = None
     try:
         driver = init_driver(headless=True)
         driver.get(url)
 
-        # Wait for page to load — use explicit wait for first match element
         try:
             WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, "div.event__match"))
             )
         except Exception:
-            time.sleep(8)  # fallback if no match element appears within timeout
-        
-        # Click "Show more matches" button repeatedly to load all matches
+            time.sleep(8)
+
         print("   🔄 Loading all matches...")
         max_attempts = 10
         attempts = 0
@@ -434,9 +274,6 @@ def scrape_flashscore_competition(competition_code: str, limit: Optional[int] = 
                 current_matches = driver.find_elements(By.CSS_SELECTOR, "div.event__match")
                 previous_match_count = len(current_matches)
 
-                # Target the footer pagination button specifically.
-                # FlashScore uses wcl-footer__button for the results "Show more matches"
-                # button. Avoid sidebar elements (leftMenu) which also contain "Show more".
                 show_more_button = None
 
                 # Priority 1: footer button by class
@@ -467,139 +304,99 @@ def scrape_flashscore_competition(competition_code: str, limit: Optional[int] = 
                 # Priority 3: footer container > any clickable "show more"
                 if not show_more_button:
                     try:
-                        candidates = driver.find_elements(By.CSS_SELECTOR,
-                            "[class*='wcl-footer'] *")
+                        candidates = driver.find_elements(By.CSS_SELECTOR, "[class*='wcl-footer'] *")
                         for btn in candidates:
                             if btn.is_displayed() and "more" in btn.text.lower():
                                 show_more_button = btn
                                 break
                     except Exception:
                         pass
-                
+
                 if show_more_button:
                     try:
-                        # Get button text for debugging
-                        button_text = show_more_button.text.strip()
-                        print(f"   🔍 Found button with text: '{button_text}'")
-                        
-                        # Scroll button into view
                         driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", show_more_button)
                         time.sleep(1)
-                        
-                        # Try clicking with JavaScript (more reliable)
                         driver.execute_script("arguments[0].click();", show_more_button)
                         attempts += 1
                         print(f"   ✓ Clicked 'Show more matches' button (attempt {attempts}/{max_attempts})")
-                        
-                        # Wait for new content to load (longer wait for dynamic content)
                         time.sleep(4)
-                        
-                        # Verify new matches were loaded
-                        try:
-                            new_matches = driver.find_elements(By.CSS_SELECTOR, "div.event__match, div[class*='event__match']")
-                            new_match_count = len(new_matches)
-                            if new_match_count > previous_match_count:
-                                print(f"   ✓ Loaded {new_match_count - previous_match_count} additional matches (total: {new_match_count})")
-                            else:
-                                print(f"   ⚠️  No new matches detected after click (still {new_match_count} matches)")
-                        except:
-                            pass
+
+                        new_matches = driver.find_elements(By.CSS_SELECTOR, "div.event__match, div[class*='event__match']")
+                        new_match_count = len(new_matches)
+                        if new_match_count > previous_match_count:
+                            print(f"   ✓ Loaded {new_match_count - previous_match_count} additional matches (total: {new_match_count})")
+                        else:
+                            print(f"   ⚠️  No new matches detected after click (still {new_match_count} matches)")
                     except Exception as e:
                         print(f"   ⚠️  Error clicking button: {str(e)}")
                         attempts += 1
                         time.sleep(1)
                 else:
-                    print(f"   ✓ No 'Show more matches' button found. All matches should be loaded.")
+                    print("   ✓ No 'Show more matches' button found. All matches loaded.")
                     break
-                    
+
             except Exception as e:
                 print(f"   ⚠️  Error while looking for 'Show more matches' button: {str(e)}")
                 attempts += 1
                 time.sleep(1)
-        
+
         if attempts >= max_attempts:
             print(f"   ⚠️  Reached maximum attempts ({max_attempts}). Proceeding with current matches.")
-        
-        # Final scroll to ensure all content is loaded
+
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(2)
-        
-        # Try using Selenium to find match elements directly
-        matches = []
-        
-        # FlashScore uses specific class patterns - try multiple selectors
-        # Based on FlashScore structure analysis
+
+        # Find match elements — try Selenium selectors first, fall back to BeautifulSoup
         match_selectors = [
-            "div.event__match",  # Most common
+            "div.event__match",
             "div[class*='event__match']",
-            "div.event__match--twoLine",  # Alternative format
-            "div[data-testid='match-row']",  # Data attribute
+            "div.event__match--twoLine",
+            "div[data-testid='match-row']",
             "div.sportName",
-            "div[class*='event']"  # Fallback
+            "div[class*='event']"
         ]
-        
+
         event_matches_selenium = []
         for selector in match_selectors:
             try:
                 elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                if elements and len(elements) > 10:  # Make sure we got a good number
+                if elements and len(elements) > 10:
                     event_matches_selenium = elements
                     print(f"   Found {len(elements)} matches using selector: {selector}")
                     break
-            except:
+            except Exception:
                 continue
-        
-        # Get page source for BeautifulSoup
+
         page_source = driver.page_source
         soup = BeautifulSoup(page_source, 'html.parser')
-        
-        # If Selenium didn't find them, try BeautifulSoup
+
         if not event_matches_selenium:
-            # FlashScore uses specific class names for matches
             event_matches = soup.find_all('div', class_=re.compile(r'event__match', re.I))
-            
             if not event_matches:
                 event_matches = soup.find_all('div', attrs={'data-testid': re.compile(r'match', re.I)})
-            
             if not event_matches:
-                # Try to find by score pattern
                 all_divs = soup.find_all('div')
                 for div in all_divs:
-                    text = div.get_text()
-                    if re.search(r'\d+\s*:\s*\d+', text):
+                    if re.search(r'\d+\s*:\s*\d+', div.get_text()):
                         event_matches.append(div)
-            
             print(f"   Found {len(event_matches)} potential match elements (BeautifulSoup)")
-            
-            # Convert to list for processing
             event_matches_list = event_matches
         else:
-            # Use Selenium elements - convert to BeautifulSoup for parsing
             event_matches_list = []
             for elem in event_matches_selenium:
                 html = elem.get_attribute('outerHTML')
                 soup_elem = BeautifulSoup(html, 'html.parser')
-                event_matches_list.append(soup_elem.find('div') or soup_elem)  # Get the main div
-        
+                event_matches_list.append(soup_elem.find('div') or soup_elem)
+
         print(f"   Found {len(event_matches_list)} potential match elements")
-        
-        # Try to extract matches using improved method
-        matches = extract_matches_from_flashscore_elements(event_matches_list, soup, competition_code, limit, params)
-        
-        # If still no matches, try the broader HTML parsing
-        # If we didn't find matches with the above method, try parsing the HTML more broadly
-        if not matches:
-            print("   Trying alternative extraction method...")
-            alt_matches = extract_matches_from_html_structure(soup, competition_code, params)
-            matches.extend(alt_matches)
-        
-        print(f"✅ Found {len(matches)} club matches from {comp_config['name']}")
-        
-        # Debug: Show first few matches if found
-        if matches and len(matches) > 0:
+
+        matches = extract_matches_from_flashscore_elements(event_matches_list, competition_code, params)
+
+        print(f"✅ Found {len(matches)} matches from {comp_config['name']}")
+        if matches:
             print(f"   Sample: {matches[0]['HOME_TEAM']} {matches[0]['HOME_GOALS']}-{matches[0]['AWAY_GOALS']} {matches[0]['AWAY_TEAM']}")
         return matches
-        
+
     except Exception as e:
         print(f"❌ Error scraping FlashScore: {e}")
         import traceback
@@ -610,567 +407,241 @@ def scrape_flashscore_competition(competition_code: str, limit: Optional[int] = 
             driver.quit()
 
 
-def extract_matches_from_flashscore_elements(elements, soup: BeautifulSoup, 
-                                            competition_code: str, 
-                                            limit: Optional[int],
-                                            params: Optional[dict] = None) -> List[Dict]:
-    """
-    Extract matches from FlashScore elements with FlashScore-specific parsing.
-    FlashScore structure: event__match > event__participant (teams) + event__score (score)
-    """
+def extract_matches_from_flashscore_elements(elements, competition_code: str,
+                                             params: Optional[dict] = None) -> List[Dict]:
+    """Extract matches from FlashScore HTML elements."""
     matches = []
     current_date = None
-    
+
     print(f"   Processing {len(elements)} elements...")
     successful = 0
-    failed = 0
+    skipped = 0  # outside date range
+    errors = 0   # actual extraction failures
     no_score = 0
     no_teams = 0
-    
-    # Debug: Inspect first few elements
-    for i, element in enumerate(elements[:3]):  # Check first 3 for debugging
-        if hasattr(element, 'get_text'):
-            text = element.get_text(separator=' | ', strip=True)[:200]
-        else:
-            text = str(element)[:200]
-        print(f"   Debug element {i+1}: {text[:150]}...")
-    
+
     for element in elements:
         try:
-            # Get the element - handle both BeautifulSoup and Selenium elements
             if hasattr(element, 'find_all'):
-                # BeautifulSoup element
                 match_element = element
             else:
-                # Selenium element - convert to BeautifulSoup
                 html = element.get_attribute('outerHTML')
                 match_element = BeautifulSoup(html, 'html.parser').find('div') or BeautifulSoup(html, 'html.parser')
-            
-            # Get full text first to understand the structure
+
             full_text = match_element.get_text(separator=' | ', strip=True)
-            
-            # FlashScore structure: Look for participant names
-            # Class names: event__participant, event__participant--home, event__participant--away
-            participants = match_element.find_all(['span', 'div', 'a'], 
-                                                 class_=re.compile(r'event__participant|participant', re.I))
-            
+
+            # --- Team extraction ---
             home_team = None
             away_team = None
-            
-            # Method 1: Extract from participant elements
+
+            # Method 1: participant class elements
+            participants = match_element.find_all(['span', 'div', 'a'],
+                                                  class_=re.compile(r'event__participant|participant', re.I))
             if len(participants) >= 2:
                 home_team = clean_team_name(participants[0].get_text(strip=True))
                 away_team = clean_team_name(participants[1].get_text(strip=True))
-                # Ensure they're different (sometimes DOM can have duplicates)
                 if home_team == away_team and len(participants) >= 3:
                     away_team = clean_team_name(participants[2].get_text(strip=True))
-            
-            # Method 2: Parse from pipe-separated text format "Team1 | Team2 | Score1 | Score2"
+
+            # Method 2: pipe-separated text
             if not home_team or not away_team:
                 parts = [p.strip() for p in full_text.split('|')]
-                # Teams are usually the first two non-numeric, non-date parts
                 team_candidates = []
                 for part in parts:
-                    # Skip if it's a number (score) or date pattern
                     if not part.isdigit() and not re.match(r'^\d{1,2}\.\d{1,2}', part):
-                        if len(part) > 2:  # Team names are usually longer
+                        if len(part) > 2:
                             team_candidates.append(part)
                             if len(team_candidates) >= 2:
                                 break
-                
                 if len(team_candidates) >= 2:
-                    # Only set if not already set, and ensure they're different
                     if not home_team:
                         home_team = clean_team_name(team_candidates[0])
                     if not away_team:
-                        # Make sure away_team is different from home_team
-                        if team_candidates[1] != home_team:
-                            away_team = clean_team_name(team_candidates[1])
-                        elif len(team_candidates) > 2 and team_candidates[2] != home_team:
-                            away_team = clean_team_name(team_candidates[2])
-                        else:
-                            # If all candidates are the same, try the first candidate again
-                            away_team = clean_team_name(team_candidates[1] if len(team_candidates) > 1 else team_candidates[0])
-            
-            # Method 3: Look for any element with team-like text
+                        candidate = team_candidates[1] if team_candidates[1] != home_team else (team_candidates[2] if len(team_candidates) > 2 else team_candidates[1])
+                        away_team = clean_team_name(candidate)
+
+            # Method 3: any element with substantial text
             if not home_team or not away_team:
-                all_text_elements = match_element.find_all(['span', 'div', 'a'])
-                # Filter for elements with substantial text (likely team names)
-                # Also remove duplicates and parent/child duplicates
                 seen_texts = set()
                 text_elements = []
-                for e in all_text_elements:
+                for e in match_element.find_all(['span', 'div', 'a']):
                     text = e.get_text(strip=True)
-                    if text and len(text) > 3 and not text.isdigit():
-                        # Only add if we haven't seen this text before
-                        if text not in seen_texts:
-                            seen_texts.add(text)
-                            text_elements.append(e)
-                        if len(text_elements) >= 2:
-                            break
-                
+                    if text and len(text) > 3 and not text.isdigit() and text not in seen_texts:
+                        seen_texts.add(text)
+                        text_elements.append(e)
+                    if len(text_elements) >= 3:
+                        break
                 if len(text_elements) >= 2:
-                    home_team_text = clean_team_name(text_elements[0].get_text(strip=True))
-                    away_team_text = clean_team_name(text_elements[1].get_text(strip=True))
-                    # Only set if not already set and they're different
                     if not home_team:
-                        home_team = home_team_text
-                    if not away_team and away_team_text != home_team:
-                        away_team = away_team_text
-                    elif not away_team:
-                        # If they're the same, try next element
-                        if len(text_elements) >= 3:
-                            away_team = clean_team_name(text_elements[2].get_text(strip=True))
-            
+                        home_team = clean_team_name(text_elements[0].get_text(strip=True))
+                    if not away_team:
+                        t = clean_team_name(text_elements[1].get_text(strip=True))
+                        away_team = t if t != home_team else (clean_team_name(text_elements[2].get_text(strip=True)) if len(text_elements) >= 3 else t)
+
             if not home_team or not away_team:
                 no_teams += 1
-                if no_teams <= 3:  # Debug first few
-                    print(f"   ⚠️  No teams found. Text: {full_text[:200]}")
                 continue
-            
-            # Clean team names - remove "Advancing to next round" and other unwanted text
-            home_team = clean_team_name(home_team)
-            away_team = clean_team_name(away_team)
-            
-            # Additional cleaning: remove leading numbers and normalize whitespace
-            home_team = re.sub(r'^\d+\.?\s*', '', home_team).strip()
-            home_team = re.sub(r'\s+', ' ', home_team)
-            away_team = re.sub(r'^\d+\.?\s*', '', away_team).strip()
-            away_team = re.sub(r'\s+', ' ', away_team)
-            
-            # Final check: if teams are the same, try to fix from pipe-separated text
-            if home_team == away_team and home_team:
-                # Try to extract again from pipe-separated format
+
+            # Normalize team names
+            home_team = re.sub(r'\s+', ' ', re.sub(r'^\d+\.?\s*', '', clean_team_name(home_team))).strip()
+            away_team = re.sub(r'\s+', ' ', re.sub(r'^\d+\.?\s*', '', clean_team_name(away_team))).strip()
+
+            # If still same, retry from pipe-separated text
+            if home_team == away_team:
                 parts = [p.strip() for p in full_text.split('|')]
-                team_candidates = []
+                candidates = []
                 for part in parts:
                     if not part.isdigit() and not re.match(r'^\d{1,2}\.\d{1,2}', part):
-                        # Clean the part before adding
-                        cleaned_part = clean_team_name(part)
-                        if len(cleaned_part) > 2 and cleaned_part not in team_candidates:
-                            team_candidates.append(cleaned_part)
-                            if len(team_candidates) >= 2:
-                                break
-                
-                if len(team_candidates) >= 2:
-                    home_team = team_candidates[0]
-                    away_team = team_candidates[1]
-            
-            if len(home_team) < 2 or len(away_team) < 2:
+                        cleaned = clean_team_name(part)
+                        if len(cleaned) > 2 and cleaned not in candidates:
+                            candidates.append(cleaned)
+                        if len(candidates) >= 2:
+                            break
+                if len(candidates) >= 2:
+                    home_team, away_team = candidates[0], candidates[1]
+
+            if len(home_team) < 2 or len(away_team) < 2 or home_team == away_team:
                 no_teams += 1
                 continue
-            
-            # Final validation: teams must be different
-            if home_team == away_team:
-                no_teams += 1
-                if no_teams <= 3:
-                    print(f"   ⚠️  Teams are the same: {home_team} vs {away_team}. Text: {full_text[:200]}")
-                continue
-            
-            # Extract score - FlashScore format can be "2:2" or "2 | 2" or just "2 2"
-            # Priority: Full-time score (including extra time) > Regular time score
+
+            # --- Score extraction ---
             home_goals = None
             away_goals = None
-
-            # Detect penalty shootout: FlashScore labels the winning team with "Pen".
-            # Penalty matches end in a DRAW at 90+ET; the match score IS the draw.
-            # ET-with-goals matches end in a non-draw; we want the non-draw score.
+            # Penalty shootout: winning team is labelled "Pen" by FlashScore.
+            # Pen matches end level at 90+ET; we want that draw score, not the shootout digits.
             has_pen = bool(re.search(r'\bpen\b', full_text, re.IGNORECASE))
-            
-            # Get parent element for checking parent-level scores
             parent = match_element.find_parent()
-            
-            # Method 1: Look in specific score elements - prioritize full-time scores FIRST
-            # FlashScore shows full-time scores in elements with classes like:
-            # - event__score--ft (full time)
-            # - event__score--final
-            # - event__part--ft
-            ft_score_elements = match_element.find_all(['span', 'div'], 
-                                                      class_=re.compile(r'event__score.*ft|event__score.*final|event__part.*ft|event__result.*ft|event__result.*final', re.I))
-            
-            # Also check parent for full-time scores
-            if not ft_score_elements and parent:
-                ft_score_elements = parent.find_all(['span', 'div'], 
-                                                    class_=re.compile(r'event__score.*ft|event__score.*final|event__part.*ft|event__result.*ft|event__result.*final', re.I))
-            
-            # Try full-time score elements first, applying pen-aware selection.
-            if ft_score_elements:
-                ft_found = []
-                for score_elem in ft_score_elements:
-                    score_text = score_elem.get_text(strip=True)
-                    m = re.search(r'(\d+)\s*[:|]\s*(\d+)', score_text)
-                    if m:
-                        ft_found.append((int(m.group(1)), int(m.group(2))))
-                if ft_found:
-                    draw    = [(h, a) for h, a in ft_found if h == a]
-                    no_draw = [(h, a) for h, a in ft_found if h != a]
-                    if has_pen:
-                        home_goals, away_goals = (draw or ft_found)[0]
-                    else:
-                        home_goals, away_goals = (no_draw or ft_found)[-1]
-            
-            # Method 2: Collect all X:Y scores from score elements, then pick the best.
-            # Rule: prefer a non-draw result (A≠B) over a draw (A=A).
-            # Rationale: ET only triggers when 90-min ends in a draw, so the 90-min score
-            # is always X:X and the ET total is always A:B (A≠B). Preferring non-draw
-            # selects the ET total without touching normal matches (single result) or
-            # pen matches (match score is still X:X, no non-draw to confuse).
+
+            def best_score(pairs, pen):
+                draw = [(h, a) for h, a in pairs if h == a]
+                no_draw = [(h, a) for h, a in pairs if h != a]
+                return (draw or pairs)[0] if pen else (no_draw or pairs)[-1]
+
+            # Method 1: full-time score elements
+            ft_elems = match_element.find_all(['span', 'div'],
+                                              class_=re.compile(r'event__score.*ft|event__score.*final|event__part.*ft|event__result.*ft|event__result.*final', re.I))
+            if not ft_elems and parent:
+                ft_elems = parent.find_all(['span', 'div'],
+                                           class_=re.compile(r'event__score.*ft|event__score.*final|event__part.*ft|event__result.*ft|event__result.*final', re.I))
+            if ft_elems:
+                pairs = [(int(m.group(1)), int(m.group(2))) for e in ft_elems for m in [re.search(r'(\d+)\s*[:|]\s*(\d+)', e.get_text(strip=True))] if m]
+                if pairs:
+                    home_goals, away_goals = best_score(pairs, has_pen)
+
+            # Method 2: generic score elements
             if home_goals is None:
-                score_elements = match_element.find_all(['span', 'div'],
-                                                       class_=re.compile(r'event__score|event__result|score', re.I))
-                if not score_elements and parent:
-                    score_elements = parent.find_all(['span', 'div'],
+                score_elems = match_element.find_all(['span', 'div'],
                                                      class_=re.compile(r'event__score|event__result|score', re.I))
+                if not score_elems and parent:
+                    score_elems = parent.find_all(['span', 'div'],
+                                                  class_=re.compile(r'event__score|event__result|score', re.I))
+                if score_elems:
+                    pairs = [(int(m.group(1)), int(m.group(2))) for e in score_elems for m in [re.search(r'(\d+)\s*[:|]\s*(\d+)', e.get_text(strip=True))] if m]
+                    if pairs:
+                        home_goals, away_goals = best_score(pairs, has_pen)
 
-                if score_elements:
-                    found = []
-                    for score_elem in score_elements:
-                        score_text = score_elem.get_text(strip=True)
-                        m = re.search(r'(\d+)\s*[:|]\s*(\d+)', score_text)
-                        if m:
-                            found.append((int(m.group(1)), int(m.group(2))))
-                    if found:
-                        draw    = [(h, a) for h, a in found if h == a]
-                        no_draw = [(h, a) for h, a in found if h != a]
-                        if has_pen:
-                            home_goals, away_goals = (draw or found)[0]
-                        else:
-                            home_goals, away_goals = (no_draw or found)[-1]
-
-            # Method 3: Fallback - all X:Y patterns in full text.
-            # Pen match → use draw score (match ended level). ET → prefer non-draw.
+            # Method 3: X:Y patterns in full text
             if home_goals is None:
-                all_score_matches = list(re.finditer(r'(\d+)\s*[:]\s*(\d+)', full_text))
-                if all_score_matches:
-                    pairs   = [(int(m.group(1)), int(m.group(2))) for m in all_score_matches]
-                    draw    = [(h, a) for h, a in pairs if h == a]
-                    no_draw = [(h, a) for h, a in pairs if h != a]
-                    if has_pen:
-                        home_goals, away_goals = (draw or pairs)[0]
-                    else:
-                        home_goals, away_goals = (no_draw or pairs)[-1]
+                pairs = [(int(m.group(1)), int(m.group(2))) for m in re.finditer(r'(\d+)\s*[:]\s*(\d+)', full_text)]
+                if pairs:
+                    home_goals, away_goals = best_score(pairs, has_pen)
 
-            # Method 4: Fallback - consecutive digit pairs in pipe-separated text.
+            # Method 4: consecutive digit pairs in pipe-separated text
             if home_goals is None:
                 parts = [p.strip() for p in full_text.split('|')]
-                score_pairs = []
-                for i in range(len(parts) - 1):
-                    if parts[i].isdigit() and parts[i+1].isdigit():
-                        score_pairs.append((int(parts[i]), int(parts[i+1])))
-                if score_pairs:
-                    draw    = [(h, a) for h, a in score_pairs if h == a]
-                    no_draw = [(h, a) for h, a in score_pairs if h != a]
-                    if has_pen:
-                        home_goals, away_goals = (draw or score_pairs)[0]
-                    else:
-                        home_goals, away_goals = (no_draw or score_pairs)[-1]
-            
+                pairs = [(int(parts[i]), int(parts[i+1])) for i in range(len(parts) - 1) if parts[i].isdigit() and parts[i+1].isdigit()]
+                if pairs:
+                    home_goals, away_goals = best_score(pairs, has_pen)
+
             if home_goals is None or away_goals is None:
                 no_score += 1
-                if no_score <= 3:  # Debug first few
-                    print(f"   ⚠️  No score found. Text: {full_text[:200]}")
                 continue
-            
-            # Extract date - FlashScore format is typically DD.MM or DD.MM.YYYY
-            # From debug output: "Ath Bilbao | PSG | 0 | 0 | 10.12...."
-            # Date appears after the scores in pipe-separated format
+
+            # --- Date extraction ---
             match_date = None
-            parent = match_element.find_parent()  # Initialize parent early so it's available for phase extraction later
-            
-            # Method 1: Parse from the pipe-separated text (date is usually after scores)
-            # Format: Team1 | Team2 | Score1 | Score2 | Date
+
+            # Method 1: pipe-separated text (DD.MM or DD.MM.YYYY)
             parts = [p.strip() for p in full_text.split('|')]
             for part in parts:
-                # Look for date pattern DD.MM or DD.MM.YYYY
-                date_match = re.search(r'(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?', part)
-                if date_match:
-                    day, month, year = date_match.groups()
-                    if year:
-                        # Full date with year
-                        try:
-                            match_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-                            current_date = match_date
-                            break
-                        except:
-                            pass
-                    else:
-                        # Date without year - infer from current date and season
-                        try:
-                            current_year = datetime.now().year
-                            # If month is in future (like 12 for December), might be previous year
-                            # For European competitions, matches are usually in current season
-                            if int(month) > datetime.now().month:
-                                # Likely previous year
-                                year = current_year - 1
-                            else:
-                                year = current_year
-                            
-                            # Try to create the date
-                            test_date = datetime(year, int(month), int(day))
-                            # If date is too far in future, it's probably previous year
-                            if test_date > datetime.now():
-                                year = year - 1
-                            
-                            match_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-                            current_date = match_date
-                            break
-                        except:
-                            pass
-            
-            # Method 2: Look in FlashScore date elements
-            if not match_date:
-                date_elements = match_element.find_all(['span', 'div'], 
-                                                       class_=re.compile(r'event__time|event__date|time|date', re.I))
-                
-                # Also check parent and siblings for date
-                if parent and not date_elements:
-                    date_elements = parent.find_all(['span', 'div'], 
-                                                   class_=re.compile(r'event__time|event__date|time|date', re.I))
-                
-                if date_elements:
-                    date_str = date_elements[0].get_text(strip=True)
-                    parsed_date = parse_date(date_str)
-                    if parsed_date:
-                        match_date = parsed_date
-                        current_date = parsed_date
-            
-            # Method 3: Look for date pattern in full text (DD.MM.YYYY format)
-            if not match_date:
-                date_match = re.search(r'(\d{1,2})[./](\d{1,2})[./](\d{4})', full_text)
-                if date_match:
-                    day, month, year = date_match.groups()
+                m = re.search(r'(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?', part)
+                if m:
+                    day, month, year = m.groups()
                     try:
-                        match_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-                        current_date = match_date
-                    except:
-                        pass
-            
-            # Method 4: Look for DD.MM format without year
-            if not match_date:
-                date_match = re.search(r'(\d{1,2})\.(\d{1,2})(?!\.)', full_text)
-                if date_match:
-                    day, month = date_match.groups()
-                    try:
-                        current_year = datetime.now().year
-                        # Infer year based on month
-                        if int(month) > datetime.now().month:
-                            year = current_year - 1
+                        if year:
+                            match_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
                         else:
-                            year = current_year
-                        
-                        test_date = datetime(year, int(month), int(day))
-                        if test_date > datetime.now():
-                            year = year - 1
-                        
+                            cur_year = datetime.now().year
+                            year = cur_year - 1 if int(month) > datetime.now().month else cur_year
+                            dt = datetime(year, int(month), int(day))
+                            if dt > datetime.now():
+                                dt = datetime(year - 1, int(month), int(day))
+                            match_date = dt.strftime("%Y-%m-%d")
+                        current_date = match_date
+                        break
+                    except Exception:
+                        pass
+
+            # Method 2: date class elements
+            if not match_date:
+                date_elems = match_element.find_all(['span', 'div'],
+                                                    class_=re.compile(r'event__time|event__date|time|date', re.I))
+                if not date_elems and parent:
+                    date_elems = parent.find_all(['span', 'div'],
+                                                 class_=re.compile(r'event__time|event__date|time|date', re.I))
+                if date_elems:
+                    parsed = parse_date(date_elems[0].get_text(strip=True))
+                    if parsed:
+                        match_date = parsed
+                        current_date = parsed
+
+            # Method 3: DD.MM.YYYY in full text
+            if not match_date:
+                m = re.search(r'(\d{1,2})[./](\d{1,2})[./](\d{4})', full_text)
+                if m:
+                    day, month, year = m.groups()
+                    try:
                         match_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
                         current_date = match_date
-                    except:
+                    except Exception:
                         pass
-            
-            # Fallback: use current_date from previous match or current date
+
+            # Method 4: DD.MM without year
             if not match_date:
-                if current_date:
-                    match_date = current_date
-                else:
-                    # Last resort: use current date (but this shouldn't happen often)
-                    match_date = datetime.now().strftime("%Y-%m-%d")
-            
-            # Determine season from params file (if provided), otherwise infer from date
+                m = re.search(r'(\d{1,2})\.(\d{1,2})(?!\.)', full_text)
+                if m:
+                    day, month = m.groups()
+                    try:
+                        cur_year = datetime.now().year
+                        year = cur_year - 1 if int(month) > datetime.now().month else cur_year
+                        dt = datetime(year, int(month), int(day))
+                        if dt > datetime.now():
+                            dt = datetime(year - 1, int(month), int(day))
+                        match_date = dt.strftime("%Y-%m-%d")
+                        current_date = match_date
+                    except Exception:
+                        pass
+
+            if not match_date:
+                match_date = current_date or datetime.now().strftime("%Y-%m-%d")
+
+            # --- Season & phase ---
             if params and params.get("SEASON"):
                 season = params["SEASON"]
-            elif match_date and match_date != "2024-01-01":
+            else:
                 try:
-                    year = int(match_date.split('-')[0])
-                    month = int(match_date.split('-')[1])
-                    if month >= 7:  # Season starts in July/August
-                        season = f"{year}/{year + 1}"
-                    else:
-                        season = f"{year - 1}/{year}"
-                except:
+                    y, mo = int(match_date.split('-')[0]), int(match_date.split('-')[1])
+                    season = f"{y}/{y+1}" if mo >= 7 else f"{y-1}/{y}"
+                except Exception:
                     season = f"{datetime.now().year - 1}/{datetime.now().year}"
-            else:
-                season = f"{datetime.now().year - 1}/{datetime.now().year}"
-            
-            # Determine phase from date parameters only
+
             phase = get_phase_from_params(match_date, competition_code, params)
-            
-            # Debug: Show first few matches being processed
-            if successful + failed < 3:
-                print(f"   🔍 Processing: {home_team} vs {away_team}, date={match_date}, home_club={is_club_team(home_team)}, away_club={is_club_team(away_team)}")
-            
-            # Only add if both teams are clubs
-            if is_club_team(home_team) and is_club_team(away_team):
-                # Check if date is valid before filtering
-                if not match_date or match_date == "2024-01-01":
-                    if successful + failed < 3:
-                        print(f"   ⚠️  Skipped (invalid date): {home_team} vs {away_team}, date={match_date}")
-                    failed += 1
-                    continue
-                
-                # Filter by date range if params provided (include matches within any phase date range)
-                if params:
-                    is_in_range = is_match_in_any_phase(match_date, competition_code, params)
-                    if not is_in_range:
-                        # Only log if the date looks like it belongs to the current season
-                        season_start = params.get(f"{competition_code}_LEAGUE_PHASE_INITIAL_DATE", "")
-                        if season_start and match_date >= season_start:
-                            print(f"   ⚠️  Dropped (no matching phase): {home_team} vs {away_team} on {match_date}")
-                        failed += 1
-                        continue
-                
-                match_id = generate_match_id(
-                    competition_code, season, phase, home_team, away_team, match_date
-                )
-                
-                matches.append({
-                    "MATCH_ID": match_id,
-                    "COMPETITION": competition_code,
-                    "SEASON": season,
-                    "PHASE": phase,
-                    "MATCH_DATE": match_date,
-                    "HOME_TEAM": home_team,
-                    "AWAY_TEAM": away_team,
-                    "HOME_GOALS": home_goals,
-                    "AWAY_GOALS": away_goals
-                })
-                successful += 1
-                
-                if limit and len(matches) >= limit:
-                    break
-            else:
-                failed += 1
-                # Debug: show why it failed
-                if failed <= 3:  # Only show first 3 failures
-                    if not is_club_team(home_team):
-                        print(f"   ⚠️  Skipped (not club): {home_team}")
-                    if not is_club_team(away_team):
-                        print(f"   ⚠️  Skipped (not club): {away_team}")
-                    
-        except Exception as e:
-            failed += 1
-            if failed <= 3:  # Only show first 3 errors
-                print(f"   ⚠️  Extraction error: {str(e)[:50]}")
-            continue
-    
-    print(f"   Extracted {successful} matches")
-    print(f"   Stats: {no_score} no score, {no_teams} no teams, {failed} errors")
-    return matches
 
+            # --- Date range filter ---
+            if params and not is_match_in_any_phase(match_date, competition_code, params):
+                skipped += 1
+                continue
 
-def extract_match_from_flashscore_element(element, competition_code: str, 
-                                          default_date: Optional[str], 
-                                          default_phase: str,
-                                          params: Optional[dict] = None) -> Optional[Dict]:
-    """
-    Extract match data from a FlashScore HTML element.
-    """
-    try:
-        text = element.get_text(separator=' ', strip=True)
-        
-        # Look for score pattern
-        score_match = re.search(r'(\d+)\s*[:]\s*(\d+)', text)
-        if not score_match:
-            return None
-        
-        home_goals = int(score_match.group(1))
-        away_goals = int(score_match.group(2))
-        
-        # Extract team names - they're usually before and after the score
-        # Or in separate spans/divs
-        team_elements = element.find_all(['span', 'div', 'a'], class_=re.compile(r'team|participant', re.I))
-        
-        home_team = None
-        away_team = None
-        
-        if len(team_elements) >= 2:
-            home_team = clean_team_name(team_elements[0].get_text(strip=True))
-            away_team = clean_team_name(team_elements[1].get_text(strip=True))
-        else:
-            # Try to extract from text
-            parts = re.split(r'\d+\s*:\s*\d+', text)
-            if len(parts) >= 2:
-                home_team = clean_team_name(parts[0].strip())
-                away_team = clean_team_name(parts[1].strip())
-        
-        if not home_team or not away_team:
-            return None
-        
-        # Extract date
-        date_element = element.find_parent().find(['span', 'div'], class_=re.compile(r'date|time', re.I))
-        if date_element:
-            date_str = date_element.get_text(strip=True)
-            match_date = parse_date(date_str)
-        else:
-            match_date = default_date or datetime.now().strftime("%Y-%m-%d")
-        
-        # Determine season from date
-        if match_date:
-            year = int(match_date.split('-')[0])
-            month = int(match_date.split('-')[1])
-            if month >= 7:  # Season starts in July/August
-                season = f"{year}/{year + 1}"
-            else:
-                season = f"{year - 1}/{year}"
-        else:
-            season = "UNKNOWN"
-        
-        # Determine phase from date parameters only
-        phase = get_phase_from_params(match_date or default_date, competition_code, params)
-        
-        match_id = generate_match_id(
-            competition_code, season, phase, home_team, away_team, 
-            match_date or "2024-01-01"
-        )
-        
-        return {
-            "MATCH_ID": match_id,
-            "COMPETITION": competition_code,
-            "SEASON": season,
-            "PHASE": phase,
-            "MATCH_DATE": match_date or "2024-01-01",
-            "HOME_TEAM": home_team,
-            "AWAY_TEAM": away_team,
-            "HOME_GOALS": home_goals,
-            "AWAY_GOALS": away_goals
-        }
-        
-    except Exception:
-        return None
-
-
-def extract_matches_from_html_structure(soup: BeautifulSoup, competition_code: str, params: Optional[dict] = None) -> List[Dict]:
-    """
-    Alternative method to extract matches by parsing HTML structure more broadly.
-    """
-    matches = []
-    
-    # Look for all text that contains score patterns
-    all_text = soup.get_text()
-    
-    # Find score patterns with context
-    score_pattern = re.compile(r'([A-Za-z\s]+?)\s+(\d+)\s*:\s*(\d+)\s+([A-Za-z\s]+)', re.MULTILINE)
-    
-    for match in score_pattern.finditer(all_text):
-        home_team = match.group(1).strip()
-        home_goals = int(match.group(2))
-        away_goals = int(match.group(3))
-        away_team = match.group(4).strip()
-        
-        # Basic validation
-        if (len(home_team) > 2 and len(away_team) > 2 and 
-            is_club_team(home_team) and is_club_team(away_team)):
-            
-            # Try to find date nearby in the HTML
-            match_date = datetime.now().strftime("%Y-%m-%d")
-            season = f"{datetime.now().year - 1}/{datetime.now().year}"
-            
-            # Determine phase from date parameters only
-            phase = get_phase_from_params(match_date, competition_code, params)
-            
-            match_id = generate_match_id(
-                competition_code, season, phase, home_team, away_team, match_date
-            )
-            
+            match_id = generate_match_id(competition_code, season, phase, home_team, away_team, match_date)
             matches.append({
                 "MATCH_ID": match_id,
                 "COMPETITION": competition_code,
@@ -1182,24 +653,21 @@ def extract_matches_from_html_structure(soup: BeautifulSoup, competition_code: s
                 "HOME_GOALS": home_goals,
                 "AWAY_GOALS": away_goals
             })
-    
+            successful += 1
+
+        except Exception as e:
+            errors += 1
+            if errors <= 3:
+                print(f"   ⚠️  Extraction error: {str(e)[:50]}")
+            continue
+
+    print(f"   Extracted {successful} matches")
+    print(f"   Stats: {no_score} no score, {no_teams} no teams, {skipped} outside date range, {errors} errors")
     return matches
 
 
-def fetch_all_competitions(limit_per_competition: Optional[int] = None, 
-                          save_csv: bool = True, params: Optional[dict] = None) -> Dict[str, List[Dict]]:
-    """
-    Scrape matches from all three European club competitions.
-    
-    Args:
-        limit_per_competition: Maximum matches per competition (None for all)
-        save_csv: Whether to save CSV files for each competition
-        params: Dictionary with scraper parameters (season and date ranges). If None, will load from file.
-    
-    Returns:
-        Dictionary with competition codes as keys and lists of matches as values
-    """
-    # Load params if not provided
+def fetch_all_competitions(save_csv: bool = True, params: Optional[dict] = None) -> Dict[str, List[Dict]]:
+    """Scrape matches from all three European club competitions."""
     if params is None:
         try:
             params = load_scraper_params()
@@ -1212,106 +680,57 @@ def fetch_all_competitions(limit_per_competition: Optional[int] = None,
             print(f"⚠️  Warning: Could not load scraper parameters: {e}")
             print("   Continuing without date filtering...\n")
             params = None
-    
+
     all_matches_by_competition = {}
-    all_matches = []
-    
-    for competition_code in COMPETITIONS.keys():
-        comp_config = COMPETITIONS[competition_code]
+
+    for competition_code, comp_config in COMPETITIONS.items():
         print(f"\n{'='*80}")
         print(f"Scraping {comp_config['name']} ({competition_code})")
         print(f"{'='*80}\n")
-        
-        matches = scrape_flashscore_competition(competition_code, limit_per_competition, params)
-        
-        # Final filter to ensure only club teams
-        club_matches = [
-            m for m in matches 
-            if is_club_team(m["HOME_TEAM"]) and is_club_team(m["AWAY_TEAM"])
-        ]
-        
-        # Sort matches by date descending
-        club_matches.sort(key=lambda x: x.get("MATCH_DATE", ""), reverse=True)
-        
-        all_matches_by_competition[competition_code] = club_matches
-        all_matches.extend(club_matches)
-        
-        print(f"✅ Retrieved {len(club_matches)} club matches from {comp_config['name']}")
 
-        # Validate match counts per phase
-        validate_matches(club_matches, competition_code)
+        matches = scrape_flashscore_competition(competition_code, params)
+        matches.sort(key=lambda x: x.get("MATCH_DATE", ""), reverse=True)
 
-        # Save CSV file for this competition
-        if save_csv and club_matches:
-            save_matches_to_csv(club_matches, competition_code)
+        all_matches_by_competition[competition_code] = matches
 
-        # Delay between competitions
+        print(f"✅ Retrieved {len(matches)} matches from {comp_config['name']}")
+        validate_matches(matches, competition_code)
+
+        if save_csv and matches:
+            save_matches_to_csv(matches, competition_code)
+
         time.sleep(3)
-    
+
     return all_matches_by_competition
 
 
 def save_matches_to_csv(matches: List[Dict], competition_code: str, filename: Optional[str] = None) -> str:
-    """
-    Save matches to a CSV file in the FILES directory at root level.
-    
-    Args:
-        matches: List of match dictionaries
-        competition_code: Competition code (UCL, UEL, UECL)
-        filename: Optional custom filename (default: competition_code_matches.csv)
-    
-    Returns:
-        Path to the created CSV file
-    """
+    """Save matches to a CSV file in the output/ directory."""
     if not matches:
         print(f"⚠️  No matches to save for {competition_code}")
         return ""
-    
-    # Get the script directory and create files folder at same level
-    script_dir = Path(__file__).parent.absolute()
-    # files folder should be at the same level as the script's folder
-    # e.g., if script is in DML/, files should be in files/ at same level
-    parent_dir = script_dir.parent
-    files_dir = parent_dir / "output"
+
+    files_dir = SCRIPT_DIR.parent / "output"
     files_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Generate filename if not provided
+
     if not filename:
         comp_name = COMPETITIONS.get(competition_code, {}).get("name", competition_code)
-        # Clean filename (remove spaces, special chars)
         safe_name = comp_name.replace(" ", "_").replace("-", "_").lower()
         filename = f"{competition_code}_{safe_name}_matches.csv"
-    
-    # Full path to the CSV file
+
     file_path = files_dir / filename
-    
-    # CSV column order matching database table structure
-    fieldnames = [
-        "MATCH_ID",
-        "COMPETITION",
-        "SEASON",
-        "PHASE",
-        "MATCH_DATE",
-        "HOME_TEAM",
-        "AWAY_TEAM",
-        "HOME_GOALS",
-        "AWAY_GOALS"
-    ]
-    
-    # Write CSV file
+
+    fieldnames = ["MATCH_ID", "COMPETITION", "SEASON", "PHASE", "MATCH_DATE",
+                  "HOME_TEAM", "AWAY_TEAM", "HOME_GOALS", "AWAY_GOALS"]
+
     try:
         with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
-            
             for match in matches:
-                # Ensure all fields are present
-                row = {field: match.get(field, '') for field in fieldnames}
-                writer.writerow(row)
-        
+                writer.writerow({field: match.get(field, '') for field in fieldnames})
         print(f"💾 Saved {len(matches)} matches to: {file_path}")
         return str(file_path)
-        
     except Exception as e:
         print(f"❌ Error saving CSV file {file_path}: {e}")
         return ""
@@ -1322,31 +741,26 @@ def print_matches_summary(matches: List[Dict]):
     if not matches:
         print("⚠️ No matches to display")
         return
-    
+
     print(f"\n{'='*80}")
-    print(f"SUMMARY: {len(matches)} Total Club Matches Retrieved")
+    print(f"SUMMARY: {len(matches)} Total Matches Retrieved")
     print(f"{'='*80}\n")
-    
-    # Group by competition
-    by_competition = {}
+
+    by_competition: Dict[str, List[Dict]] = {}
     for match in matches:
         comp = match["COMPETITION"]
-        if comp not in by_competition:
-            by_competition[comp] = []
-        by_competition[comp].append(match)
-    
+        by_competition.setdefault(comp, []).append(match)
+
     for comp_code, comp_matches in by_competition.items():
         comp_name = COMPETITIONS.get(comp_code, {}).get("name", comp_code)
         print(f"\n{comp_name} ({comp_code}): {len(comp_matches)} matches")
         print("-" * 80)
-        
-        for match in comp_matches[:10]:  # Show first 10 per competition
+        for match in comp_matches[:10]:
             print(
                 f"[{match['SEASON']} | {match['MATCH_DATE']} | {match['PHASE']}] "
                 f"{match['HOME_TEAM']} {match['HOME_GOALS']} - "
                 f"{match['AWAY_GOALS']} {match['AWAY_TEAM']}"
             )
-        
         if len(comp_matches) > 10:
             print(f"... and {len(comp_matches) - 10} more matches")
 
@@ -1358,38 +772,25 @@ if __name__ == "__main__":
         print("Scraping from FlashScore.com")
         print("Champions League, Europa League, Conference League")
         print("=" * 80)
-        print("ℹ️  Only CLUB teams are included - national teams are filtered out.\n")
-        print("⚠️  Note: This requires ChromeDriver to be installed.")
-        print("   Download from: https://chromedriver.chromium.org/\n")
         print()
-        
-        # Scrape all competitions and save CSV files
-        matches_by_competition = fetch_all_competitions(limit_per_competition=None, save_csv=True)
-        
-        # Combine all matches for summary
-        all_matches = []
-        for comp_matches in matches_by_competition.values():
-            all_matches.extend(comp_matches)
-        
-        # Print summary
+
+        matches_by_competition = fetch_all_competitions(save_csv=True)
+
+        all_matches = [m for comp in matches_by_competition.values() for m in comp]
+
         if all_matches:
             print_matches_summary(all_matches)
-            print(f"\n✅ Total club matches ready for database: {len(all_matches)}")
+            print(f"\n✅ Total matches ready for database: {len(all_matches)}")
             print(f"\n📁 CSV files created:")
             for comp_code, comp_matches in matches_by_competition.items():
                 if comp_matches:
                     comp_name = COMPETITIONS.get(comp_code, {}).get("name", comp_code)
                     safe_name = comp_name.replace(" ", "_").replace("-", "_").lower()
-                    filename = f"{comp_code}_{safe_name}_matches.csv"
-                    print(f"   - {filename} ({len(comp_matches)} matches)")
+                    print(f"   - {comp_code}_{safe_name}_matches.csv ({len(comp_matches)} matches)")
         else:
             print("\n⚠️  No matches were retrieved.")
-            print("   This could be due to:")
-            print("   - Website structure changes")
-            print("   - ChromeDriver not installed or not in PATH")
-            print("   - Network issues")
-            print("   - Anti-scraping measures")
-        
+            print("   This could be due to website structure changes, ChromeDriver issues, or network problems.")
+
     except Exception as e:
         print(f"❌ Fatal Error: {e}")
         import traceback
