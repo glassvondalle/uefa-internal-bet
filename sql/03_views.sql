@@ -191,12 +191,16 @@ advancement AS (
             SELECT DISTINCT competition, away_team  FROM european_club_cups_matches WHERE phase = 'FINAL'
         )
         UNION ALL
-        -- Won Final (single-leg — higher goals wins)
+        -- Won Final (single-leg — higher goals wins, or penalty winner hardcoded by match_id)
         (
             SELECT competition,
                    CASE WHEN home_goals > away_goals THEN home_team ELSE away_team END AS team
             FROM european_club_cups_matches
             WHERE phase = 'FINAL' AND home_goals <> away_goals
+            UNION
+            SELECT competition, 'PSG' AS team
+            FROM european_club_cups_matches
+            WHERE match_id = 'UCL_2025_2026_FINAL_A299097D'
         )
     ) adv
     GROUP BY competition, team
