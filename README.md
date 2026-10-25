@@ -70,13 +70,13 @@ therefore wipes the old one.
    for each cup. A phase runs from its first matchday to its last; a match outside every range is ignored.
 3. **Participants.** Replace the rows in `sql/04_participants.sql` with this year's draft.
    Team names must match FlashScore exactly (e.g. `Atl. Madrid`, `Bodo/Glimt`), so check
-   them against the CSV `HOME_TEAM` / `AWAY_TEAM` values.
-4. **Clear the old data** in the Neon SQL Editor. The participants file only *inserts*,
-   so old picks stay unless you truncate:
+   them against the CSV `HOME_TEAM` / `AWAY_TEAM` values. The file starts with
+   `TRUNCATE participantes;`, so it always replaces the whole table.
+4. **Clear the old matches** in the Neon SQL Editor (optional, `load_to_db.py` replaces them anyway):
    ```sql
-   TRUNCATE european_club_cups_matches, european_club_cups_load_log, participantes;
+   TRUNCATE european_club_cups_matches, european_club_cups_load_log;
    ```
-5. `python setup_db.py` → re-creates views and inserts the new participants.
+5. `python setup_db.py` → re-creates views and replaces the participants.
 6. Run the routine above (scrape → load → app).
 7. **Hard-coded leftovers from 2025/26.** Update these when they matter:
    - `app.py`: titles `UEFA BET 2025/26` (lines 2, 886, 893).
