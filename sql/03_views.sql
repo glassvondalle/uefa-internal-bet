@@ -105,12 +105,77 @@ FROM a
 ORDER BY competition, pos;
 
 -- -------------------------------------------------------------------------
+-- League phase status per competition (shared by apuesta_table and team_status)
+--   finished: the end date passed AND all 36 teams played every match,
+--             or knockout matches already exist (the league phase is over)
+-- -------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW league_phase_status AS
+SELECT
+    cp.competition,
+    cp.end_date,
+    COUNT(lp.team) = 36                                            AS all_teams,
+    COUNT(lp.team) = 36 AND BOOL_AND(lp.mp = cp.matches_per_team)  AS all_played,
+    (COUNT(lp.team) = 36 AND BOOL_AND(lp.mp = cp.matches_per_team) AND CURRENT_DATE >= cp.end_date)
+        OR EXISTS (SELECT 1 FROM european_club_cups_matches m
+                   WHERE m.competition = cp.competition AND m.phase <> 'LEAGUE_PHASE') AS finished
+FROM competition_phases cp
+LEFT JOIN real_table_league_phase lp ON lp.competition = cp.competition
+WHERE cp.phase = 'LEAGUE_PHASE'
+GROUP BY cp.competition, cp.matches_per_team, cp.end_date;
+
+-- -------------------------------------------------------------------------
+-- Knockout ties (shared by apuesta_table and team_status)
+--   One row per tie, aggregate goals over its legs.
+--   leader:  team ahead on aggregate (provisional while not decided)
+--   decided: all legs played with a winner on aggregate, or one team already
+--            appears in the next round (resolves penalties and missing legs)
+-- -------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW knockout_ties AS
+WITH
+ties AS (
+    SELECT m.competition, m.phase, cp.phase_order, cp.matches_per_team AS legs_needed, cp.end_date,
+        LEAST(m.home_team, m.away_team)    AS t1,
+        GREATEST(m.home_team, m.away_team) AS t2,
+        COUNT(*) AS legs,
+        SUM(CASE WHEN m.home_team < m.away_team THEN m.home_goals ELSE m.away_goals END) AS g1,
+        SUM(CASE WHEN m.home_team < m.away_team THEN m.away_goals ELSE m.home_goals END) AS g2
+    FROM european_club_cups_matches m
+    JOIN competition_phases cp ON cp.competition = m.competition AND cp.phase = m.phase
+    WHERE m.phase <> 'LEAGUE_PHASE'
+    GROUP BY m.competition, m.phase, cp.phase_order, cp.matches_per_team, cp.end_date,
+             LEAST(m.home_team, m.away_team), GREATEST(m.home_team, m.away_team)
+),
+appearances AS (
+    SELECT DISTINCT m.competition, cp.phase_order, t.team
+    FROM european_club_cups_matches m
+    JOIN competition_phases cp ON cp.competition = m.competition AND cp.phase = m.phase
+    CROSS JOIN LATERAL (VALUES (m.home_team), (m.away_team)) t(team)
+),
+nxt AS (
+    SELECT k.*,
+        EXISTS (SELECT 1 FROM appearances a
+                WHERE a.competition = k.competition AND a.phase_order = k.phase_order + 1 AND a.team = k.t1) AS t1_next,
+        EXISTS (SELECT 1 FROM appearances a
+                WHERE a.competition = k.competition AND a.phase_order = k.phase_order + 1 AND a.team = k.t2) AS t2_next
+    FROM ties k
+)
+SELECT competition, phase, phase_order, end_date, t1, t2, legs, legs_needed, g1, g2,
+    CASE WHEN t1_next THEN t1 WHEN t2_next THEN t2
+         WHEN g1 > g2 THEN t1 WHEN g2 > g1 THEN t2 END        AS leader,
+    t1_next OR t2_next OR (legs >= legs_needed AND g1 <> g2)  AS decided,
+    legs >= legs_needed                                       AS complete
+FROM nxt;
+
+-- -------------------------------------------------------------------------
 -- Betting table
 --
 -- Points per match:  win=2, draw=1, loss=0  (all phases)
--- Top-8 bonus:       UCL=4, UEL=3, UECL=2  (finished top 8 in league phase)
--- Advancement bonus: +1 per knockout round advanced FROM (R16, QF, SF, Final)
+-- Top-8 bonus:       UCL=4, UEL=3, UECL=2  (top 8 once the league phase is over)
+-- Advancement bonus: +1 per knockout tie won (R16, QF, SF, Final), once the tie is decided
 --                    playoff advancement gives NO bonus
+-- Bonuses are paid when the round ends, whether or not the team plays the next one.
 -- pos: league-phase position (determines CLASIFICADO / PLAYOFFS / ELIMINADO)
 -- -------------------------------------------------------------------------
 
@@ -149,61 +214,28 @@ bet_match_pts AS (
     GROUP BY competition, team
 ),
 
--- Top-8 bonus: finished 1-8 in league phase (direct qualification to R16)
+-- Top-8 bonus: finished 1-8 in league phase (direct qualification to R16).
+-- Paid once the whole league phase is over (league_phase_status.finished); a provisional
+-- top 8 during the league phase earns nothing.
 top8_bonus AS (
-    SELECT competition, team,
-        CASE competition
+    SELECT lp.competition, lp.team,
+        CASE lp.competition
             WHEN 'UCL'  THEN 4
             WHEN 'UEL'  THEN 3
             WHEN 'UECL' THEN 2
         END AS bonus
-    FROM real_table_league_phase
-    WHERE pos <= 8
+    FROM real_table_league_phase lp
+    JOIN league_phase_status s ON s.competition = lp.competition
+    WHERE lp.pos <= 8 AND s.finished
 ),
 
--- Advancement bonus: +1 per knockout round advanced FROM (excluding playoff)
--- Logic: a team "won round X" if they appear in round X+1.
--- Final winner is detected from the match result (single-leg).
--- Parentheses are required: UNION and UNION ALL have equal precedence in PostgreSQL
--- and evaluate left-to-right, so without them the trailing UNION would deduplicate
--- across all blocks, counting each team only once regardless of rounds advanced.
+-- Advancement bonus: +1 per knockout tie won, excluding the play-off.
+-- Paid as soon as the tie is decided (knockout_ties.decided).
 advancement AS (
-    SELECT competition, team, COUNT(*) AS bonus
-    FROM (
-        -- Won R16 → appears in QF
-        (
-            SELECT DISTINCT competition, home_team AS team FROM european_club_cups_matches WHERE phase = 'QUARTER_FINAL'
-            UNION
-            SELECT DISTINCT competition, away_team           FROM european_club_cups_matches WHERE phase = 'QUARTER_FINAL'
-        )
-        UNION ALL
-        -- Won QF → appears in SF
-        (
-            SELECT DISTINCT competition, home_team FROM european_club_cups_matches WHERE phase = 'SEMI_FINAL'
-            UNION
-            SELECT DISTINCT competition, away_team  FROM european_club_cups_matches WHERE phase = 'SEMI_FINAL'
-        )
-        UNION ALL
-        -- Won SF → appears in Final
-        (
-            SELECT DISTINCT competition, home_team FROM european_club_cups_matches WHERE phase = 'FINAL'
-            UNION
-            SELECT DISTINCT competition, away_team  FROM european_club_cups_matches WHERE phase = 'FINAL'
-        )
-        UNION ALL
-        -- Won Final (single-leg — higher goals wins, or penalty winner hardcoded by match_id)
-        (
-            SELECT competition,
-                   CASE WHEN home_goals > away_goals THEN home_team ELSE away_team END AS team
-            FROM european_club_cups_matches
-            WHERE phase = 'FINAL' AND home_goals <> away_goals
-            UNION
-            SELECT competition, 'PSG' AS team
-            FROM european_club_cups_matches
-            WHERE match_id = 'UCL_2025_2026_FINAL_A299097D'
-        )
-    ) adv
-    GROUP BY competition, team
+    SELECT competition, leader AS team, COUNT(*) AS bonus
+    FROM knockout_ties
+    WHERE decided AND phase IN ('ROUND_OF_16', 'QUARTER_FINAL', 'SEMI_FINAL', 'FINAL')
+    GROUP BY competition, leader
 )
 
 SELECT
@@ -232,3 +264,112 @@ SELECT
 FROM participantes p
 LEFT JOIN apuesta_table a ON p.team = a.team
 GROUP BY p.jugador;
+
+-- -------------------------------------------------------------------------
+-- Team status: una fila por equipo y competición, con flags de estado
+--
+--   fase_actual        fase más avanzada que jugó el equipo
+--   resultado          liga:          TOP8 / PLAYOFF / ELIMINADO
+--                      eliminatorias: AVANZA / ELIMINADO / EMPATE / PENALES
+--                      final:         CAMPEON / FINALISTA / PENALES
+--   es_definitivo      false = momentáneo, true = ya no puede cambiar
+--   motivo             FECHA / MATEMATICO / ELIMINATORIA (por qué es definitivo)
+--   esta_vivo          sigue en competición (los estados momentáneos cuentan como vivos)
+--   datos_incompletos  la fecha de la fase ya pasó pero faltan partidos cargados
+--
+-- Fase de liga: 1-8 TOP8, 9-24 PLAYOFF, 25-36 ELIMINADO según la tabla actual.
+--   Definitivo por FECHA: la fase terminó (ver league_phase_status).
+--   Definitivo por MATEMATICO antes de eso (solo puntos, empate cuenta en contra):
+--     pts_max = pts + 3 * partidos restantes
+--     TOP8      como mucho 7 rivales pueden llegar a sus puntos actuales
+--     ELIMINADO al menos 24 rivales ya superan su pts_max
+--     PLAYOFF   como mucho 23 pueden llegar a sus puntos y al menos 8 ya superan su pts_max
+-- Eliminatorias: global de ida y vuelta (ver knockout_ties); con una sola pierna es momentáneo.
+-- -------------------------------------------------------------------------
+
+CREATE OR REPLACE VIEW team_status AS
+WITH
+league AS (
+    SELECT lp.competition, lp.team, lp.pos, lp.pts,
+        cp.matches_per_team - lp.mp                AS remaining,
+        lp.pts + 3 * (cp.matches_per_team - lp.mp) AS pts_max,
+        cp.end_date
+    FROM real_table_league_phase lp
+    JOIN competition_phases cp
+      ON cp.competition = lp.competition AND cp.phase = 'LEAGUE_PHASE'
+),
+league_math AS (
+    SELECT t.competition, t.team,
+        COUNT(*) FILTER (WHERE x.pts_max >= t.pts) AS rivals_can_reach,
+        COUNT(*) FILTER (WHERE x.pts > t.pts_max)  AS rivals_out_of_reach
+    FROM league t
+    JOIN league x ON x.competition = t.competition AND x.team <> t.team
+    GROUP BY t.competition, t.team
+),
+league_status AS (
+    SELECT l.competition, l.team, l.pos, l.pts, l.pts_max, l.remaining,
+        lps.finished                                  AS finished,
+        lps.all_teams AND (
+               m.rivals_can_reach <= 7
+            OR m.rivals_out_of_reach >= 24
+            OR (m.rivals_can_reach <= 23 AND m.rivals_out_of_reach >= 8)
+        )                                             AS clinched,
+        NOT lps.all_played AND CURRENT_DATE > lps.end_date AS datos_incompletos
+    FROM league l
+    JOIN league_phase_status lps ON lps.competition = l.competition
+    LEFT JOIN league_math m  ON m.competition = l.competition AND m.team = l.team
+),
+-- La matemática siempre coincide con la posición actual, así que el resultado sale
+-- de la posición y la matemática solo decide si ya es definitivo.
+league_rows AS (
+    SELECT competition, team,
+        'LEAGUE_PHASE' AS fase_actual,
+        CASE WHEN pos <= 8 THEN 'TOP8' WHEN pos <= 24 THEN 'PLAYOFF' ELSE 'ELIMINADO' END AS resultado,
+        finished OR COALESCE(clinched, FALSE) AS es_definitivo,
+        CASE WHEN finished THEN 'FECHA' WHEN clinched THEN 'MATEMATICO' END AS motivo,
+        datos_incompletos
+    FROM league_status
+),
+ko_latest AS (
+    SELECT DISTINCT ON (d.competition, s.team)
+        d.competition, s.team, d.phase, d.leader, d.decided, d.complete,
+        NOT d.decided AND NOT d.complete AND CURRENT_DATE > d.end_date AS datos_incompletos
+    FROM knockout_ties d
+    CROSS JOIN LATERAL (VALUES (d.t1), (d.t2)) s(team)
+    ORDER BY d.competition, s.team, d.phase_order DESC
+),
+ko_rows AS (
+    SELECT competition, team,
+        phase AS fase_actual,
+        CASE
+            WHEN leader IS NULL THEN CASE WHEN complete THEN 'PENALES' ELSE 'EMPATE' END
+            WHEN phase = 'FINAL' AND decided THEN CASE WHEN leader = team THEN 'CAMPEON' ELSE 'FINALISTA' END
+            WHEN leader = team THEN 'AVANZA'
+            ELSE 'ELIMINADO'
+        END AS resultado,
+        decided AS es_definitivo,
+        CASE WHEN decided THEN 'ELIMINATORIA' END AS motivo,
+        datos_incompletos
+    FROM ko_latest
+),
+combined AS (
+    SELECT * FROM ko_rows
+    UNION ALL
+    SELECT lr.* FROM league_rows lr
+    WHERE NOT EXISTS (SELECT 1 FROM ko_rows k WHERE k.competition = lr.competition AND k.team = lr.team)
+)
+SELECT
+    c.competition,
+    c.team,
+    c.fase_actual,
+    c.resultado,
+    c.es_definitivo,
+    NOT (c.es_definitivo AND c.resultado IN ('ELIMINADO', 'FINALISTA')) AS esta_vivo,
+    c.motivo,
+    c.datos_incompletos,
+    ls.pos       AS pos_liga,
+    ls.pts       AS pts_liga,
+    ls.pts_max   AS pts_max_liga,
+    ls.remaining AS partidos_restantes_liga
+FROM combined c
+LEFT JOIN league_status ls ON ls.competition = c.competition AND ls.team = c.team;

@@ -83,142 +83,21 @@ def query_jugador_details(jugador: str) -> pd.DataFrame:
     )
 
 
+STATUS_COLUMNS = [
+    "COMPETITION", "TEAM", "FASE_ACTUAL", "RESULTADO", "ES_DEFINITIVO", "ESTA_VIVO",
+    "MOTIVO", "DATOS_INCOMPLETOS", "POS_LIGA", "PTS_LIGA", "PTS_MAX_LIGA", "PARTIDOS_RESTANTES_LIGA",
+]
+
+
 def query_team_statuses() -> pd.DataFrame:
     """
-    Devuelve (competition, team, is_alive, status_label) para todos los equipos.
-
-    Para rondas de ida y vuelta (Playoff, Octavos, Cuartos, Semis) calcula el
-    ganador por marcador agregado, lo que permite distinguir al eliminado del
-    superviviente incluso antes de que la siguiente ronda se haya jugado.
+    Estado de cada equipo desde la vista team_status (flags calculados en SQL),
+    más las columnas de presentación STATUS_LABEL / STATUS_SHORT.
     """
-    return _fetch("""
-        WITH
-        -- Marcador agregado por eliminatoria (ida + vuelta)
-        -- LEAST/GREATEST ordena los equipos alfabéticamente para agrupar ambas piernas.
-        -- t1 = equipo con nombre menor, t2 = mayor.
-        tie_agg AS (
-            SELECT competition, phase,
-                LEAST(home_team, away_team)    AS t1,
-                GREATEST(home_team, away_team) AS t2,
-                SUM(CASE WHEN home_team < away_team THEN home_goals ELSE away_goals END) AS t1_goals,
-                SUM(CASE WHEN home_team < away_team THEN away_goals ELSE home_goals END) AS t2_goals
-            FROM european_club_cups_matches
-            WHERE phase IN ('PLAYOFF','ROUND_OF_16','QUARTER_FINAL','SEMI_FINAL')
-            GROUP BY competition, phase,
-                     LEAST(home_team, away_team), GREATEST(home_team, away_team)
-        ),
-        tie_outcomes AS (
-            SELECT ta.competition, ta.phase,
-                CASE
-                    WHEN ta.t1_goals > ta.t2_goals THEN ta.t1
-                    WHEN ta.t2_goals > ta.t1_goals THEN ta.t2
-                    -- Aggregate draw (settled by penalties): winner is whichever team
-                    -- appears in the next phase (works once that phase has data).
-                    WHEN ta.t1_goals = ta.t2_goals AND EXISTS (
-                        SELECT 1 FROM european_club_cups_matches m
-                        WHERE m.competition = ta.competition
-                          AND m.phase = CASE ta.phase
-                              WHEN 'PLAYOFF'       THEN 'ROUND_OF_16'
-                              WHEN 'ROUND_OF_16'   THEN 'QUARTER_FINAL'
-                              WHEN 'QUARTER_FINAL' THEN 'SEMI_FINAL'
-                              WHEN 'SEMI_FINAL'    THEN 'FINAL' END
-                          AND (m.home_team = ta.t1 OR m.away_team = ta.t1)
-                    ) THEN ta.t1
-                    WHEN ta.t1_goals = ta.t2_goals AND EXISTS (
-                        SELECT 1 FROM european_club_cups_matches m
-                        WHERE m.competition = ta.competition
-                          AND m.phase = CASE ta.phase
-                              WHEN 'PLAYOFF'       THEN 'ROUND_OF_16'
-                              WHEN 'ROUND_OF_16'   THEN 'QUARTER_FINAL'
-                              WHEN 'QUARTER_FINAL' THEN 'SEMI_FINAL'
-                              WHEN 'SEMI_FINAL'    THEN 'FINAL' END
-                          AND (m.home_team = ta.t2 OR m.away_team = ta.t2)
-                    ) THEN ta.t2
-                END AS winner,
-                CASE
-                    WHEN ta.t1_goals > ta.t2_goals THEN ta.t2
-                    WHEN ta.t2_goals > ta.t1_goals THEN ta.t1
-                    WHEN ta.t1_goals = ta.t2_goals AND EXISTS (
-                        SELECT 1 FROM european_club_cups_matches m
-                        WHERE m.competition = ta.competition
-                          AND m.phase = CASE ta.phase
-                              WHEN 'PLAYOFF'       THEN 'ROUND_OF_16'
-                              WHEN 'ROUND_OF_16'   THEN 'QUARTER_FINAL'
-                              WHEN 'QUARTER_FINAL' THEN 'SEMI_FINAL'
-                              WHEN 'SEMI_FINAL'    THEN 'FINAL' END
-                          AND (m.home_team = ta.t1 OR m.away_team = ta.t1)
-                    ) THEN ta.t2
-                    WHEN ta.t1_goals = ta.t2_goals AND EXISTS (
-                        SELECT 1 FROM european_club_cups_matches m
-                        WHERE m.competition = ta.competition
-                          AND m.phase = CASE ta.phase
-                              WHEN 'PLAYOFF'       THEN 'ROUND_OF_16'
-                              WHEN 'ROUND_OF_16'   THEN 'QUARTER_FINAL'
-                              WHEN 'QUARTER_FINAL' THEN 'SEMI_FINAL'
-                              WHEN 'SEMI_FINAL'    THEN 'FINAL' END
-                          AND (m.home_team = ta.t2 OR m.away_team = ta.t2)
-                    ) THEN ta.t1
-                END AS loser
-            FROM tie_agg ta
-        ),
-        -- Final: partido único
-        final_outcome AS (
-            SELECT competition,
-                CASE WHEN home_goals > away_goals THEN home_team ELSE away_team END AS winner,
-                CASE WHEN home_goals > away_goals THEN away_team ELSE home_team END AS loser
-            FROM european_club_cups_matches
-            WHERE phase = 'FINAL' AND home_goals <> away_goals
-        ),
-        -- Todos los eliminados con su fase de eliminación
-        eliminated AS (
-            SELECT competition, phase AS elim_phase, loser AS team
-            FROM   tie_outcomes WHERE loser IS NOT NULL
-            UNION ALL
-            SELECT competition, 'FINAL', loser FROM final_outcome WHERE loser IS NOT NULL
-        ),
-        -- Fase máxima alcanzada por cada equipo
-        team_phases AS (
-            SELECT competition, home_team AS team, phase FROM european_club_cups_matches
-            UNION
-            SELECT competition, away_team, phase FROM european_club_cups_matches
-        ),
-        team_max AS (
-            SELECT competition, team,
-                MAX(CASE phase
-                    WHEN 'LEAGUE_PHASE'  THEN 1
-                    WHEN 'PLAYOFF'       THEN 2
-                    WHEN 'ROUND_OF_16'   THEN 3
-                    WHEN 'QUARTER_FINAL' THEN 4
-                    WHEN 'SEMI_FINAL'    THEN 5
-                    WHEN 'FINAL'         THEN 6
-                    ELSE 0 END) AS max_ord
-            FROM team_phases GROUP BY competition, team
-        ),
-        final_champ AS (
-            SELECT competition, winner AS team FROM final_outcome WHERE winner IS NOT NULL
-        )
-        SELECT
-            tm.competition,
-            tm.team,
-            -- Vivo = no está en la lista de eliminados Y jugó al menos una ronda
-            (el.team IS NULL AND tm.max_ord > 1) AS is_alive,
-            CASE
-                WHEN fc.team  IS NOT NULL              THEN '🏆 Campeón'
-                WHEN el.elim_phase = 'FINAL'           THEN '🥈 Finalista'
-                WHEN el.team IS NULL AND tm.max_ord>=5 THEN '⚽ En la Final'
-                WHEN el.elim_phase = 'SEMI_FINAL'      THEN 'Eliminado en Semifinales'
-                WHEN el.team IS NULL AND tm.max_ord=4  THEN '🔥 En Cuartos de Final'
-                WHEN el.elim_phase = 'QUARTER_FINAL'   THEN 'Eliminado en Cuartos de Final'
-                WHEN el.team IS NULL AND tm.max_ord=3  THEN '🔥 En Octavos de Final'
-                WHEN el.elim_phase = 'ROUND_OF_16'     THEN 'Eliminado en Octavos de Final'
-                WHEN el.team IS NULL AND tm.max_ord=2  THEN '🔥 En Play-off'
-                WHEN el.elim_phase = 'PLAYOFF'         THEN 'Eliminado en Play-off'
-                ELSE                                        'Eliminado en Fase de Liga'
-            END AS status_label
-        FROM      team_max    tm
-        LEFT JOIN eliminated  el ON tm.competition = el.competition AND tm.team = el.team
-        LEFT JOIN final_champ fc ON tm.competition = fc.competition AND tm.team = fc.team
-    """)
+    df = _fetch("SELECT * FROM team_status")
+    if df.empty:
+        df = pd.DataFrame(columns=STATUS_COLUMNS)
+    return add_status_labels(df)
 
 
 def query_league_phase_table(competition: str) -> pd.DataFrame:
@@ -287,8 +166,11 @@ def compute_shirt_winners(
     for comp in ['UCL', 'UEL', 'UECL']:
         row = finals_df[finals_df['COMPETITION'] == comp]
         if row.empty:
-            # Final not recorded yet — derive finalists from status (⚽ En la Final)
-            mask  = (status_df['COMPETITION'] == comp) & status_df['STATUS_LABEL'].str.contains('⚽', na=False)
+            # Final not recorded yet — finalists are the decided semi-final winners
+            mask  = ((status_df['COMPETITION'] == comp)
+                     & (status_df['FASE_ACTUAL'] == 'SEMI_FINAL')
+                     & (status_df['RESULTADO'] == 'AVANZA')
+                     & status_df['ES_DEFINITIVO'].astype(bool))
             teams = status_df.loc[mask, 'TEAM'].tolist()
             if len(teams) >= 2:
                 result[comp] = {
@@ -404,72 +286,109 @@ def render_prize_section(shirt_winners: dict):
 # Estado helpers
 # ---------------------------------------------------------------------------
 
-def format_comp_cell(statuses: list) -> str:
+PHASE_ORDER = {"LEAGUE_PHASE": 1, "PLAYOFF": 2, "ROUND_OF_16": 3, "QUARTER_FINAL": 4, "SEMI_FINAL": 5, "FINAL": 6}
+RESULT_ORDER = {"CAMPEON": 1, "TOP8": 2, "AVANZA": 3, "PLAYOFF": 4, "EMPATE": 5, "PENALES": 6,
+                "ELIMINADO": 7, "FINALISTA": 8}
+PHASE_NAMES = {"PLAYOFF": "Play-off", "ROUND_OF_16": "Octavos", "QUARTER_FINAL": "Cuartos",
+               "SEMI_FINAL": "Semifinales", "FINAL": "Final"}
+NEXT_PHASE  = {"PLAYOFF": "Octavos", "ROUND_OF_16": "Cuartos", "QUARTER_FINAL": "Semifinales",
+               "SEMI_FINAL": "la Final"}
+# Teams that play each knockout round (Play-off: 16 playing + 8 waiting in R16).
+ROUND_SIZE  = {"PLAYOFF": 16, "ROUND_OF_16": 16, "QUARTER_FINAL": 8, "SEMI_FINAL": 4, "FINAL": 2}
+
+LEAGUE_LABELS = {
+    # (resultado, es_definitivo): (texto largo, texto corto)
+    ("TOP8",      False): ("🔥 Clasificando a próxima ronda", "Top 8"),
+    ("TOP8",      True):  ("✅ Clasificado a octavos",        "Octavos ✓"),
+    ("PLAYOFF",   False): ("🔥 Clasificando a play-offs",     "Zona play-off"),
+    ("PLAYOFF",   True):  ("✅ Clasificado a play-offs",      "Play-off ✓"),
+    ("ELIMINADO", False): ("⏳ Eliminado momentáneamente",    "Fuera (mom.)"),
+    ("ELIMINADO", True):  ("❌ Eliminado en fase de liga",    "Elim. Liga"),
+}
+
+
+def status_labels(fase: str, resultado: str, definitivo: bool) -> tuple:
+    """Presentation only: (long, short) text for a team_status row. Logic lives in the flags."""
+    if fase == "LEAGUE_PHASE":
+        return LEAGUE_LABELS.get((resultado, bool(definitivo)), ("Sin datos", "—"))
+
+    name = PHASE_NAMES.get(fase, fase)
+    if resultado == "CAMPEON":
+        return "🏆 Campeón", "🏆 Campeón"
+    if resultado == "FINALISTA":
+        return "🥈 Finalista", "🥈 Finalista"
+    if resultado == "PENALES":
+        return f"⏳ {name}: penales sin resolver", f"{name} (penales)"
+    if resultado == "EMPATE":
+        return f"🔥 Empatando eliminatoria de {name}", f"{name} (empate)"
+    if resultado == "AVANZA":
+        if definitivo:
+            nxt = NEXT_PHASE.get(fase, "")
+            return f"✅ Clasificado a {nxt}", f"{nxt.replace('la ', '').capitalize()} ✓"
+        return f"🔥 Ganando eliminatoria de {name}", f"{name} (ganando)"
+    if resultado == "ELIMINADO":
+        if definitivo:
+            return f"❌ Eliminado en {name}", f"Elim. {name}"
+        return f"⏳ Perdiendo eliminatoria de {name}", f"{name} (perdiendo)"
+    return "Sin datos", "—"
+
+
+def add_status_labels(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    labels = [status_labels(f, r, d) for f, r, d in
+              zip(df["FASE_ACTUAL"], df["RESULTADO"], df["ES_DEFINITIVO"])]
+    df["STATUS_LABEL"] = [l for l, _ in labels]
+    df["STATUS_SHORT"] = [s for _, s in labels]
+    df["IS_ALIVE"]     = df["ESTA_VIVO"].astype(bool)
+    return df
+
+
+def format_comp_cell(rows: pd.DataFrame) -> str:
     """Summarises a player's 3 teams in one competition as a short text string."""
-    alive_cnt = Counter()
-    elim_cnt  = Counter()
-
-    for s in (str(x) for x in statuses):
-        if   '🏆' in s:                  alive_cnt['🏆 Campeón'] += 1
-        elif '⚽' in s:                  alive_cnt['⚽ Final']   += 1
-        elif '🔥 En Cuartos'  in s:      alive_cnt['🔥 Cuartos'] += 1
-        elif '🔥 En Octavos'  in s:      alive_cnt['🔥 Octavos'] += 1
-        elif '🔥 En Play-off' in s:      alive_cnt['🔥 Play-off'] += 1
-        elif '🥈' in s:                  elim_cnt['Final']    += 1
-        elif 'Semifinal'   in s:         elim_cnt['Semis']    += 1
-        elif 'Cuartos'     in s:         elim_cnt['Cuartos']  += 1
-        elif 'Octavos'     in s:         elim_cnt['Octavos']  += 1
-        elif 'Play-off'    in s:         elim_cnt['Play-off'] += 1
-        else:                            elim_cnt['Liga']     += 1
-
+    if rows.empty:
+        return '—'
+    # Alive first, then most advanced phase, then best result
+    rows = rows.assign(
+        _dead=~rows["IS_ALIVE"],
+        _ord=-rows["FASE_ACTUAL"].map(PHASE_ORDER).fillna(0),
+        _res=rows["RESULTADO"].map(RESULT_ORDER).fillna(99),
+    ).sort_values(["_dead", "_ord", "_res"])
+    counts = Counter(rows["STATUS_SHORT"])
     parts = []
-    for phase in ['🏆 Campeón', '⚽ Final', '🔥 Cuartos', '🔥 Octavos', '🔥 Play-off']:
-        n = alive_cnt.get(phase, 0)
-        if n:
-            parts.append(f"{n} {phase}" if n > 1 else phase)
-
-    for phase in ['Final', 'Semis', 'Cuartos', 'Octavos', 'Play-off', 'Liga']:
-        n = elim_cnt.get(phase, 0)
-        if n:
-            label = '🥈 Finalista' if phase == 'Final' else f'Elim. {phase}'
-            parts.append(f"{n} {label}" if n > 1 else label)
-
-    return ' · '.join(parts) if parts else '—'
+    for short in dict.fromkeys(rows["STATUS_SHORT"]):   # keeps sorted order, no duplicates
+        n = counts[short]
+        parts.append(f"{n} {short}" if n > 1 else short)
+    return ' · '.join(parts)
 
 
 def get_sanity_check(df_status: pd.DataFrame) -> dict:
     """
-    For each competition, returns how many teams are alive and the expected count
-    based on the most advanced alive phase.
+    For each competition, returns how many teams are alive and how many there should be.
 
-    Expected alive per competition:
-      ⚽ Final        → 2   (UCL/UEL/UECL have 1 final with 2 teams)
-      🔥 Cuartos      → 8   (4 QF ties × 2 teams)
-      🔥 Octavos      → 16  (8 R16 ties × 2 teams)
-      🏆 Campeón only → 1   (tournament complete)
-      🔥 Play-off     → None (complex: 8 direct + up to 16 in playoff)
+    Expected alive:
+      League phase in progress   → None (any team can still qualify)
+      League phase all decided   → 24   (8 to R16 + 16 to play-off)
+      Knockout round in progress → teams in that round (Play-off: + 8 waiting in R16)
+      Knockout round all decided → half of them (Final: 1, the champion)
     """
     result = {}
     for comp in ['UCL', 'UEL', 'UECL']:
-        labels = df_status.loc[df_status['COMPETITION'] == comp, 'STATUS_LABEL'].fillna('').tolist()
+        d = df_status[df_status['COMPETITION'] == comp]
+        n_alive = int(d['IS_ALIVE'].sum())
+        ko = d[d['FASE_ACTUAL'] != 'LEAGUE_PHASE']
 
-        n_champ   = sum(1 for s in labels if '🏆' in s)
-        n_final   = sum(1 for s in labels if '⚽' in s)
-        n_cuartos = sum(1 for s in labels if '🔥 En Cuartos'  in s)
-        n_octavos = sum(1 for s in labels if '🔥 En Octavos'  in s)
-        n_playoff = sum(1 for s in labels if '🔥 En Play-off' in s)
-        n_alive   = n_champ + n_final + n_cuartos + n_octavos + n_playoff
-
-        if n_champ > 0 and n_final == 0:
-            expected = 1
-        elif n_final > 0:
-            expected = 2
-        elif n_cuartos > 0:
-            expected = 8
-        elif n_octavos > 0:
-            expected = 16
-        else:
+        if d.empty:
             expected = None
+        elif ko.empty:
+            expected = 24 if d['ES_DEFINITIVO'].all() else None
+        else:
+            top   = max(ko['FASE_ACTUAL'], key=lambda f: PHASE_ORDER.get(f, 0))
+            cur   = ko[ko['FASE_ACTUAL'] == top]
+            size  = ROUND_SIZE.get(top, len(cur))
+            done  = len(cur) == size and cur['ES_DEFINITIVO'].all()
+            expected = size // 2 if done else size
+            if top == 'PLAYOFF':
+                expected += 8
 
         result[comp] = {'alive': n_alive, 'expected': expected}
     return result
@@ -673,12 +592,13 @@ def tab_player(df_ranking: pd.DataFrame, df_statuses: pd.DataFrame):
 
     # Merge dynamic status
     df = df_details.merge(
-        df_statuses[["COMPETITION", "TEAM", "IS_ALIVE", "STATUS_LABEL"]],
+        df_statuses[["COMPETITION", "TEAM", "IS_ALIVE", "STATUS_LABEL", "RESULTADO", "ES_DEFINITIVO", "FASE_ACTUAL"]],
         on=["COMPETITION", "TEAM"],
         how="left",
     )
-    df["IS_ALIVE"]    = df["IS_ALIVE"].fillna(False)
-    df["STATUS_LABEL"] = df["STATUS_LABEL"].fillna("Sin datos")
+    df["IS_ALIVE"]      = df["IS_ALIVE"].fillna(False).astype(bool)
+    df["ES_DEFINITIVO"] = df["ES_DEFINITIVO"].fillna(False).astype(bool)
+    df["STATUS_LABEL"]  = df["STATUS_LABEL"].fillna("Sin datos")
 
     df["POS"] = pd.to_numeric(df["POS"], errors="coerce")
     comp_order = {"UCL": 1, "UEL": 2, "UECL": 3}
@@ -714,25 +634,27 @@ def tab_player(df_ranking: pd.DataFrame, df_statuses: pd.DataFrame):
             unsafe_allow_html=True,
         )
 
+        grp  = grp.reset_index(drop=True)
         disp = grp[["TEAM", "MP", "W", "D", "L", "PTS", "STATUS_LABEL"]].copy()
         disp.columns = ["Equipo", "PJ", "V", "E", "D", "Pts", "Estado"]
 
-        def style_row(row, _c=c):
-            estado = str(row["Estado"])
-            # Alive teams have a live emoji in their label
-            vivo = any(e in estado for e in ("🏆", "⚽", "🔥"))
-            if "Campeón"   in estado:
-                return ["background-color:#7d6000; color:#FFD700; font-weight:bold"] * len(row)
-            if "Finalista" in estado:
-                return ["background-color:#3a3a4a; color:#C0C0C0; font-style:italic"] * len(row)
-            if vivo:
-                return [f"background-color:{_c['primary']}; color:white"] * len(row)
-            if "Fase de Liga" in estado:
-                return ["background-color:#1c1c1c; color:#777; text-decoration:line-through"] * len(row)
-            return ["background-color:#1c1c1c; color:#888; font-style:italic"] * len(row)
+        def row_style(r, _c=c):
+            if r.RESULTADO == "CAMPEON":
+                return "background-color:#7d6000; color:#FFD700; font-weight:bold"
+            if r.RESULTADO == "FINALISTA":
+                return "background-color:#3a3a4a; color:#C0C0C0; font-style:italic"
+            if r.IS_ALIVE and r.RESULTADO == "ELIMINADO":   # momentarily out
+                return "background-color:#2a2a2a; color:#bbb; font-style:italic"
+            if r.IS_ALIVE:
+                return f"background-color:{_c['primary']}; color:white"
+            if r.FASE_ACTUAL == "LEAGUE_PHASE":
+                return "background-color:#1c1c1c; color:#777; text-decoration:line-through"
+            return "background-color:#1c1c1c; color:#888; font-style:italic"
+
+        styles = [row_style(r) for r in grp.itertuples()]
 
         st.dataframe(
-            disp.style.apply(style_row, axis=1),
+            disp.style.apply(lambda row: [styles[row.name]] * len(row), axis=1),
             hide_index=True, use_container_width=True,
         )
 
@@ -775,6 +697,11 @@ def tab_estado(df_status: pd.DataFrame):
             <div class="sub">{sub}</div>
         </div>""", unsafe_allow_html=True)
 
+    incompletas = sorted(df_status.loc[df_status['DATOS_INCOMPLETOS'].fillna(False).astype(bool), 'COMPETITION'].unique())
+    if incompletas:
+        st.warning(f"Faltan partidos por cargar en {', '.join(incompletas)}: la fecha de la fase ya pasó. "
+                   "Los estados siguen como momentáneos hasta que corras el scraper.")
+
     st.markdown("")
 
     # --- Matrix ---
@@ -786,20 +713,20 @@ def tab_estado(df_status: pd.DataFrame):
         return
 
     df = df_parts.merge(
-        df_status[['COMPETITION', 'TEAM', 'STATUS_LABEL']],
+        df_status[['COMPETITION', 'TEAM', 'STATUS_SHORT', 'IS_ALIVE', 'FASE_ACTUAL', 'RESULTADO']],
         on=['COMPETITION', 'TEAM'],
         how='left',
     )
-    df['STATUS_LABEL'] = df['STATUS_LABEL'].fillna('Sin datos')
+    df['STATUS_SHORT'] = df['STATUS_SHORT'].fillna('Sin datos')
+    df['IS_ALIVE']     = df['IS_ALIVE'].fillna(False).astype(bool)
 
     jugadores = sorted(df['JUGADOR'].unique())
     rows = []
     for jugador in jugadores:
         row = {'Jugador': jugador}
         for comp in ['UCL', 'UEL', 'UECL']:
-            mask     = (df['JUGADOR'] == jugador) & (df['COMPETITION'] == comp)
-            statuses = df.loc[mask, 'STATUS_LABEL'].tolist()
-            row[comp] = format_comp_cell(statuses)
+            mask      = (df['JUGADOR'] == jugador) & (df['COMPETITION'] == comp)
+            row[comp] = format_comp_cell(df.loc[mask])
         rows.append(row)
 
     matrix = pd.DataFrame(rows)
@@ -812,7 +739,7 @@ def tab_estado(df_status: pd.DataFrame):
 # Tab 4: Tabla Real
 # ---------------------------------------------------------------------------
 
-def tab_league_phase():
+def tab_league_phase(df_status: pd.DataFrame):
     st.markdown('<p class="section-header">Tabla Fase de Liga — 3 pts / victoria</p>', unsafe_allow_html=True)
 
     comp = st.radio("Competición:", ["UCL", "UEL", "UECL"], horizontal=True)
@@ -857,8 +784,10 @@ def tab_league_phase():
     lc3.markdown('<span style="background:#2a2a2a;padding:3px 10px;border-radius:6px;color:#777;font-size:0.8rem">■ 25-36 — Eliminado</span>', unsafe_allow_html=True)
     st.markdown("")
 
-    disp = df.copy()
-    disp.columns = ["Equipo", "PJ", "V", "E", "D", "GF", "GC", "DG", "Pts", "Pos"]
+    status = df_status.loc[df_status["COMPETITION"] == comp, ["TEAM", "STATUS_LABEL"]]
+    disp = df.merge(status, on="TEAM", how="left")
+    disp["STATUS_LABEL"] = disp["STATUS_LABEL"].fillna("Sin datos")
+    disp.columns = ["Equipo", "PJ", "V", "E", "D", "GF", "GC", "DG", "Pts", "Pos", "Estado"]
 
     def style_real_row(row, _c=c):
         try:
@@ -914,7 +843,7 @@ def main():
     with t3:
         tab_estado(df_status)
     with t4:
-        tab_league_phase()
+        tab_league_phase(df_status)
 
 
 if __name__ == "__main__":

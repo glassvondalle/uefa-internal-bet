@@ -14,7 +14,7 @@ FlashScore ──(1) scraper/get_results.py──▶ output/*.csv ──(2) scra
 |---|---|---|
 | 0 | `setup_db.py` | Creates tables + views and loads the players/teams. Safe to re-run. |
 | 1 | `scraper/get_results.py` | Opens FlashScore in headless Chrome, scrapes results, keeps only matches inside the phase dates of `params/scraper_params.json`, writes one CSV per cup to `output/`. Qualifiers are dropped because they fall outside those dates. |
-| 2 | `scraper/load_to_db.py` | Replaces each cup's rows in the DB with the contents of its CSV. |
+| 2 | `scraper/load_to_db.py` | Loads the phase calendar from `scraper_params.json` into `competition_phases`, then replaces each cup's rows in the DB with the contents of its CSV. |
 | 3 | `streamlit run app.py` | The dashboard. Reads the views (`apuesta_table`, `reclasificacion`, ...). |
 
 > `ddl/`, `dml/`, `files/`, `orchestrator/` and `params/snowflake_config.json` are the
@@ -68,6 +68,8 @@ therefore wipes the old one.
 2. **Dates.** Update `params/scraper_params.json`: set `SEASON` and every phase's
    `*_INITIAL_DATE` / `*_END_DATE` from uefa.com's "teams, dates, draws, format, final" page
    for each cup. A phase runs from its first matchday to its last; a match outside every range is ignored.
+   Also check `*_LEAGUE_PHASE_MATCHES_PER_TEAM` (8 for UCL/UEL, 6 for UECL). Team statuses
+   only become final once the end date has passed **and** every team has played that many matches.
 3. **Participants.** Replace the rows in `sql/04_participants.sql` with this year's draft.
    Team names must match FlashScore exactly (e.g. `Atl. Madrid`, `Bodo/Glimt`), so check
    them against the CSV `HOME_TEAM` / `AWAY_TEAM` values. The file starts with
@@ -111,7 +113,22 @@ WHERE NOT EXISTS (SELECT 1 FROM european_club_cups_matches m
 -- the standings the app shows
 SELECT * FROM reclasificacion;
 SELECT * FROM apuesta_table;
+
+-- each team's status: provisional (es_definitivo = false) or final, and why
+SELECT competition, team, fase_actual, resultado, es_definitivo, motivo, esta_vivo, pos_liga, pts_liga, pts_max_liga
+FROM team_status ORDER BY competition, pos_liga;
 ```
+
+### How team statuses work (`team_status` view)
+
+| Phase | `resultado` | Becomes final (`es_definitivo`) when |
+|---|---|---|
+| League | `TOP8` (1–8), `PLAYOFF` (9–24), `ELIMINADO` (25–36), from the current table | the end date has passed and all matches are loaded (`FECHA`), or earlier if the points make it impossible to change (`MATEMATICO`) |
+| Knockout | `AVANZA`, `ELIMINADO`, `EMPATE`, `PENALES` on aggregate | both legs are loaded, or a team already appears in the next round (`ELIMINATORIA`) |
+| Final | `CAMPEON`, `FINALISTA`, `PENALES` | the match is loaded with a winner |
+
+`datos_incompletos = true` means a phase's end date passed but matches are missing: run the scraper.
+`app.py` only turns these flags into text (`status_labels`).
 
 **From the terminal** (no extra installs, uses `params/db_config.json`):
 
@@ -151,8 +168,8 @@ app.py                     Streamlit dashboard
 setup_db.py                runs sql/01 → 03 → 04 against Neon
 scraper/get_results.py     FlashScore → output/*.csv
 scraper/load_to_db.py      output/*.csv → Neon
-sql/01_schema.sql          tables
-sql/03_views.sql           scoring logic (league table, bet table, reclasificación)
+sql/01_schema.sql          tables (matches, load log, competition_phases, participantes)
+sql/03_views.sql           scoring logic (league table, bet table, reclasificación, team_status)
 sql/04_participants.sql    player → team picks
 params/scraper_params.json season + phase date windows
 params/db_config.json      DB connection (you create it, git-ignored)

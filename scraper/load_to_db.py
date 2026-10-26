@@ -16,7 +16,11 @@ import psycopg2
 SCRIPT_DIR = Path(__file__).parent.absolute()
 ROOT_DIR = SCRIPT_DIR.parent
 OUTPUT_DIR = ROOT_DIR / "output"
+PARAMS_PATH = ROOT_DIR / "params" / "scraper_params.json"
 COMPETITION_PREFIXES = ["UCL_", "UEL_", "UECL_"]
+COMPETITIONS = ["UCL", "UEL", "UECL"]
+# Phase order matters: team_status uses phase_order + 1 to find the next round.
+PHASES = ["LEAGUE_PHASE", "PLAYOFF", "ROUND_OF_16", "QUARTER_FINAL", "SEMI_FINAL", "FINAL"]
 
 
 def get_db_url() -> str:
@@ -38,6 +42,41 @@ def connect(db_url: str):
     except Exception as e:
         print(f"❌ Connection failed: {e}")
         sys.exit(1)
+
+
+def load_phases(conn) -> int:
+    """Replaces competition_phases with the phase calendar from scraper_params.json."""
+    with open(PARAMS_PATH, encoding="utf-8") as f:
+        params = json.load(f)
+
+    rows = []
+    for comp in COMPETITIONS:
+        for order, phase in enumerate(PHASES, start=1):
+            if phase == "LEAGUE_PHASE":
+                matches_per_team = params[f"{comp}_LEAGUE_PHASE_MATCHES_PER_TEAM"]
+            elif phase == "FINAL":
+                matches_per_team = 1
+            else:
+                matches_per_team = 2
+            rows.append((
+                comp, phase, params.get("SEASON"), order,
+                params[f"{comp}_{phase}_INITIAL_DATE"],
+                params[f"{comp}_{phase}_END_DATE"],
+                matches_per_team,
+            ))
+
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM competition_phases")
+        cur.executemany(
+            """
+            INSERT INTO competition_phases
+                (competition, phase, season, phase_order, start_date, end_date, matches_per_team)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            rows,
+        )
+    conn.commit()
+    return len(rows)
 
 
 def find_csv_files():
@@ -106,6 +145,15 @@ def main():
 
     db_url = get_db_url()
     conn = connect(db_url)
+
+    print(f"Loading phase calendar from {PARAMS_PATH.name}...")
+    try:
+        print(f"   ✅ {load_phases(conn)} phases loaded")
+    except Exception as e:
+        conn.rollback()
+        print(f"   ❌ Failed: {e}")
+        conn.close()
+        sys.exit(1)
 
     csv_files = find_csv_files()
     if not csv_files:
